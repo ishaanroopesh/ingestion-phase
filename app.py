@@ -10,6 +10,50 @@ from typing import Dict, List, Optional
 import time
 from datetime import datetime
 import os
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from io import BytesIO
+
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.enums import TA_LEFT
+from reportlab.lib.units import inch
+from pypdf import PdfReader, PdfWriter
+from docx import Document
+
+def extract_template_outline(template_bytes: bytes) -> List[str]:
+    """Module-level extractor for PDF template headings to avoid class reload ordering issues."""
+    try:
+        reader = PdfReader(BytesIO(template_bytes))
+        text = []
+        for page in reader.pages[:3]:
+            try:
+                text.append(page.extract_text() or "")
+            except Exception:
+                continue
+        joined = "\n".join(text)
+        lines = [l.strip() for l in joined.splitlines()]
+        candidates: List[str] = []
+        for line in lines:
+            if not line:
+                continue
+            if len(line) < 3 or len(line) > 80:
+                continue
+            if line.lower().startswith("page "):
+                continue
+            looks_like_heading = (
+                line.endswith(":") or
+                (line.isupper() and any(c.isalpha() for c in line)) or
+                (line.istitle() and sum(ch.isalpha() for ch in line) >= 6)
+            )
+            if looks_like_heading:
+                normalized = line.rstrip(":").strip()
+                if normalized not in candidates:
+                    candidates.append(normalized)
+        return candidates[:30] if candidates else []
+    except Exception:
+        return []
 
 # Try to import autogen, but make it optional
 try:
@@ -19,6 +63,70 @@ except ImportError:
     AUTOGEN_AVAILABLE = False
     st.warning("⚠️ AutoGen not available. Some features may be limited.")
 
+# Performance: HTTP session and model/db connectors
+def _get_css(minimal: bool) -> str:
+    if minimal:
+        return """
+<style>
+    :root {
+        --bg:#ffffff; 
+        --fg:#0f172a; 
+        --muted:#64748b; 
+        --border:#e2e8f0; 
+        --primary:#0ea5e9; 
+        --primary-dark:#0284c7;
+        --accent-blue:#0ea5e9;
+        --text-dark:#0f172a;
+        --text-light:#64748b;
+        --success-green:#16a34a;
+        --danger-red:#dc2626;
+        --card:#ffffff;
+        --card-muted:#f8fafc;
+    }
+    .main-header { padding: 1rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--fg); }
+    .main-header h1 { margin:0; font-size: 1.4rem; }
+    .patient-card, .metric-card, .chat-container, .summary-card { border: 1px solid var(--border); border-radius: 12px; padding: 1rem; background: var(--card); color: var(--fg); }
+    .patient-card h4, .metric-card h4, .summary-card h3 { color: var(--text-dark); }
+    .chat-message { border:1px solid var(--border); border-left:4px solid var(--primary); border-radius:10px; padding:.75rem; background:var(--card-muted); color: var(--text-dark); }
+    .doctor-message { background:var(--card-muted); }
+    .ai-message { background:var(--card-muted); border-left-color:#9333ea; }
+    .stButton > button { background: var(--primary); color:#fff; border:0; border-radius:10px; padding:.6rem 1rem; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+    .stButton > button:hover { background: var(--primary-dark); }
+    .stTextArea textarea, .stTextInput input { border-radius:10px !important; border:1px solid var(--border) !important; }
+</style>
+"""
+    return ""
+
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from requests import Session
+
+def _http_session() -> Session:
+    session = requests.Session()
+    retries = Retry(total=2, backoff_factor=0.2, status_forcelist=[429, 502, 503, 504])
+    adapter = HTTPAdapter(max_retries=retries, pool_connections=10, pool_maxsize=10)
+    session.headers.update({"Connection": "keep-alive"})
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+def _load_tokenizer_model():
+    tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
+    model = AutoModel.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
+    model.eval()
+    if torch.cuda.is_available():
+        model.to("cuda")
+    return tokenizer, model
+
+def _connect_mongo(uri: str):
+    client = MongoClient(uri)
+    return client
+
+def _connect_chroma(path: str):
+    client = chromadb.PersistentClient(path=path)
+    collection = client.get_or_create_collection("patient_embeddings")
+    return client, collection
+
 # Page configuration
 st.set_page_config(
     page_title="Medical Discharge Summary Assistant",
@@ -27,410 +135,39 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for professional medical UI with improved contrast
 st.markdown("""
 <style>
-    /* Main theme colors */
     :root {
-        --primary-blue: #1e3c72;
-        --secondary-blue: #2a5298;
-        --accent-blue: #007bff;
-        --success-green: #28a745;
-        --warning-orange: #ffc107;
-        --danger-red: #dc3545;
-        --light-gray: #f8f9fa;
-        --dark-gray: #343a40;
-        --text-dark: #212529;
-        --text-light: #6c757d;
+        --bg:#ffffff; 
+        --fg:#0f172a; 
+        --muted:#64748b; 
+        --border:#e2e8f0; 
+        --primary:#0ea5e9; 
+        --primary-dark:#0284c7; 
+        --success:#16a34a;
+        --accent-blue:#0ea5e9;
+        --text-dark:#0f172a;
+        --text-light:#64748b;
+        --success-green:#16a34a;
+        --danger-red:#dc2626;
+        --card:#ffffff;
+        --card-muted:#f8fafc;
     }
-    
-    /* Main header with gradient */
-    .main-header {
-        background: linear-gradient(135deg, var(--primary-blue) 0%, var(--secondary-blue) 100%);
-        padding: 2.5rem;
-        border-radius: 15px;
-        color: white;
-        text-align: center;
-        margin-bottom: 2rem;
-        box-shadow: 0 8px 32px rgba(30, 60, 114, 0.3);
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .main-header::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="grain" width="100" height="100" patternUnits="userSpaceOnUse"><circle cx="25" cy="25" r="1" fill="white" opacity="0.1"/><circle cx="75" cy="75" r="1" fill="white" opacity="0.1"/><circle cx="50" cy="10" r="0.5" fill="white" opacity="0.1"/></pattern></defs><rect width="100" height="100" fill="url(%23grain)"/></svg>');
-        pointer-events: none;
-    }
-    
-    .main-header h1 {
-        font-size: 2.5rem;
-        font-weight: 700;
-        margin-bottom: 0.5rem;
-        text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-    }
-    
-    .main-header p {
-        font-size: 1.2rem;
-        opacity: 0.9;
-        margin: 0;
-    }
-    
-    /* Patient card with better contrast */
-    .patient-card {
-        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
-        border-left: 5px solid var(--accent-blue);
-        padding: 1.5rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        transition: transform 0.3s ease, box-shadow 0.3s ease;
-    }
-    
-    .patient-card:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(0,0,0,0.15);
-    }
-    
-    .patient-card h4 {
-        color: var(--text-dark);
-        font-weight: 600;
-        margin-bottom: 0.5rem;
-    }
-    
-    .patient-card p {
-        color: var(--text-light);
-        margin: 0.25rem 0;
-    }
-    
-    /* Summary card with improved styling */
-    .summary-card {
-        background: linear-gradient(135deg, #e8f5e8 0%, #f0f8f0 100%);
-        border: 2px solid var(--success-green);
-        padding: 2rem;
-        border-radius: 15px;
-        margin: 1rem 0;
-        box-shadow: 0 6px 20px rgba(40, 167, 69, 0.2);
-    }
-    
-    .summary-card h3 {
-        color: var(--success-green);
-        font-weight: 600;
-        margin-bottom: 1rem;
-    }
-    
-    /* Chat messages with high contrast */
-    .chat-message {
-        padding: 1.25rem;
-        margin: 0.75rem 0;
-        border-radius: 15px;
-        border-left: 5px solid;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        transition: all 0.3s ease;
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .chat-message::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        bottom: 0;
-        background: linear-gradient(45deg, transparent 30%, rgba(255,255,255,0.1) 50%, transparent 70%);
-        transform: translateX(-100%);
-        transition: transform 0.6s ease;
-    }
-    
-    .chat-message:hover::before {
-        transform: translateX(100%);
-    }
-    
-    .doctor-message {
-        background: linear-gradient(135deg, #e3f2fd 0%, #f0f8ff 100%);
-        border-left-color: var(--accent-blue);
-        color: var(--text-dark);
-    }
-    
-    .doctor-message strong {
-        color: var(--accent-blue);
-        font-weight: 600;
-    }
-    
-    .ai-message {
-        background: linear-gradient(135deg, #f3e5f5 0%, #faf5ff 100%);
-        border-left-color: #9c27b0;
-        color: var(--text-dark);
-    }
-    
-    .ai-message strong {
-        color: #9c27b0;
-        font-weight: 600;
-    }
-    
-    /* Metric cards */
-    .metric-card {
-        background: linear-gradient(135deg, #ffffff 0%, #f8f9fa 100%);
-        padding: 1.5rem;
-        border-radius: 12px;
-        box-shadow: 0 4px 16px rgba(0,0,0,0.1);
-        text-align: center;
-        transition: transform 0.3s ease;
-        border: 1px solid #e9ecef;
-    }
-    
-    .metric-card:hover {
-        transform: translateY(-3px);
-        box-shadow: 0 8px 24px rgba(0,0,0,0.15);
-    }
-    
-    /* Enhanced buttons */
-    .stButton > button {
-        background: linear-gradient(135deg, var(--accent-blue) 0%, #0056b3 100%);
-        color: white;
-        border: none;
-        border-radius: 8px;
-        padding: 0.75rem 1.5rem;
-        font-weight: 600;
-        font-size: 1rem;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 12px rgba(0, 123, 255, 0.3);
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .stButton > button::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: -100%;
-        width: 100%;
-        height: 100%;
-        background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-        transition: left 0.5s ease;
-    }
-    
-    .stButton > button:hover {
-        background: linear-gradient(135deg, #0056b3 0%, #004085 100%);
-        transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(0, 123, 255, 0.4);
-    }
-    
-    .stButton > button:hover::before {
-        left: 100%;
-    }
-    
-    /* Primary button variant */
-    .stButton > button[kind="primary"] {
-        background: linear-gradient(135deg, var(--success-green) 0%, #1e7e34 100%);
-        box-shadow: 0 4px 12px rgba(40, 167, 69, 0.3);
-    }
-    
-    .stButton > button[kind="primary"]:hover {
-        background: linear-gradient(135deg, #1e7e34 0%, #155724 100%);
-        box-shadow: 0 8px 24px rgba(40, 167, 69, 0.4);
-    }
-    
-    /* Sidebar styling */
-    .css-1d391kg {
-        background: linear-gradient(180deg, #f8f9fa 0%, #ffffff 100%);
-    }
-    
-    /* Sidebar text contrast */
-    .sidebar .stMarkdown h1,
-    .sidebar .stMarkdown h2,
-    .sidebar .stMarkdown h3,
-    .sidebar .stMarkdown h4,
-    .sidebar .stMarkdown h5,
-    .sidebar .stMarkdown h6 {
-        color: var(--text-dark) !important;
-    }
-    
-    .sidebar .stMarkdown p {
-        color: var(--text-dark) !important;
-    }
-    
-    /* Success/Error message styling */
-    .stSuccess {
-        background: linear-gradient(135deg, #d4edda 0%, #c3e6cb 100%);
-        border: 1px solid var(--success-green);
-        color: var(--text-dark);
-    }
-    
-    .stError {
-        background: linear-gradient(135deg, #f8d7da 0%, #f5c6cb 100%);
-        border: 1px solid var(--danger-red);
-        color: var(--text-dark);
-    }
-    
-    .stInfo {
-        background: linear-gradient(135deg, #d1ecf1 0%, #bee5eb 100%);
-        border: 1px solid #17a2b8;
-        color: var(--text-dark);
-    }
-    
-    /* Spinner styling */
-    .stSpinner {
-        color: var(--accent-blue);
-    }
-    
-    /* Form styling improvements */
-    .stForm > div {
-        background: #ffffff;
-        border-radius: 10px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-        border: 1px solid #e9ecef;
-    }
-    
-    /* Text area improvements */
-    .stTextArea textarea {
-        background: #ffffff !important;
-        border: 2px solid #e9ecef !important;
-        border-radius: 10px !important;
-        padding: 0.75rem !important;
-        font-size: 1rem !important;
-        line-height: 1.5 !important;
-        transition: all 0.3s ease !important;
-        color: var(--text-dark) !important;
-    }
-    
-    .stTextArea textarea:focus {
-        border-color: var(--accent-blue) !important;
-        box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1) !important;
-        outline: none !important;
-        color: var(--text-dark) !important;
-    }
-    
-    .stTextArea textarea::placeholder {
-        color: var(--text-light) !important;
-        opacity: 0.7 !important;
-    }
-    
-    /* Input field styling */
-    .stTextInput > div > div > input {
-        background: #ffffff !important;
-        border: 2px solid #e9ecef !important;
-        border-radius: 8px !important;
-        padding: 0.5rem !important;
-        color: var(--text-dark) !important;
-        font-size: 1rem !important;
-    }
-    
-    .stTextInput > div > div > input:focus {
-        border-color: var(--accent-blue) !important;
-        box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1) !important;
-        outline: none !important;
-    }
-    
-    .stTextInput > div > div > input::placeholder {
-        color: var(--text-light) !important;
-        opacity: 0.7 !important;
-    }
-    
-    /* Button improvements */
-    .stButton > button {
-        font-size: 1rem;
-        font-weight: 600;
-        text-transform: none;
-        letter-spacing: 0.5px;
-    }
-    
-    /* Chat container improvements */
-    .chat-container {
-        background: #ffffff;
-        border-radius: 15px;
-        padding: 1.5rem;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.1);
-        margin-bottom: 1rem;
-        min-height: 400px;
-        max-height: 500px;
-        overflow-y: auto;
-        border: 1px solid #e9ecef;
-    }
-    
-    /* Scrollbar styling */
-    .chat-container::-webkit-scrollbar {
-        width: 8px;
-    }
-    
-    .chat-container::-webkit-scrollbar-track {
-        background: #f1f1f1;
-        border-radius: 4px;
-    }
-    
-    .chat-container::-webkit-scrollbar-thumb {
-        background: var(--accent-blue);
-        border-radius: 4px;
-    }
-    
-    .chat-container::-webkit-scrollbar-thumb:hover {
-        background: #0056b3;
-    }
-    
-    /* Text area styling */
-    .stTextArea > div > div > textarea {
-        border-radius: 10px;
-        border: 2px solid #e9ecef;
-        transition: border-color 0.3s ease, box-shadow 0.3s ease;
-    }
-    
-    .stTextArea > div > div > textarea:focus {
-        border-color: var(--accent-blue);
-        box-shadow: 0 0 0 3px rgba(0, 123, 255, 0.1);
-    }
-    
-    /* Form styling */
-    .stForm {
-        border: 1px solid #e9ecef;
-        border-radius: 10px;
-        padding: 1rem;
-        background: #ffffff;
-        box-shadow: 0 2px 8px rgba(0,0,0,0.05);
-    }
-    
-    /* Status indicators */
-    .status-connected {
-        color: var(--success-green);
-        font-weight: 600;
-    }
-    
-    .status-error {
-        color: var(--danger-red);
-        font-weight: 600;
-    }
-    
-    /* Loading animation */
-    @keyframes pulse {
-        0% { opacity: 1; }
-        50% { opacity: 0.5; }
-        100% { opacity: 1; }
-    }
-    
-    .loading {
-        animation: pulse 2s infinite;
-    }
-    
-    /* Responsive design */
-    @media (max-width: 768px) {
-        .main-header h1 {
-            font-size: 2rem;
-        }
-        
-        .main-header p {
-            font-size: 1rem;
-        }
-        
-        .chat-message {
-            padding: 1rem;
-        }
-    }
+    .main-header { padding: 1rem; border: 1px solid var(--border); border-radius: 12px; background: var(--card); color: var(--fg); text-align:center; margin-bottom: 1rem; }
+    .main-header h1 { margin:0; font-size: 1.4rem; }
+    .patient-card, .metric-card, .chat-container, .summary-card { border: 1px solid var(--border); border-radius: 12px; padding: 1rem; background: var(--card); color: var(--fg); }
+    .metric-card h4 { margin: 0 0 .25rem 0; color: var(--success); font-size: 1rem; }
+    .metric-card p { margin: .25rem 0; color: var(--fg); }
+    .chat-message { border:1px solid var(--border); border-left:4px solid var(--primary); border-radius:10px; padding:.75rem; background:var(--card-muted); color: var(--text-dark); }
+    .doctor-message { background:var(--card-muted); }
+    .ai-message { background:var(--card-muted); border-left-color:#9333ea; }
+    .stButton > button { background: var(--primary); color:#fff; border:0; border-radius:10px; padding:.6rem 1rem; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+    .stButton > button:hover { background: var(--primary-dark); }
+    .stTextArea textarea, .stTextInput input { border-radius:10px !important; border:1px solid var(--border) !important; }
+    .empty-state { width:100%; text-align:center; border: 1px dashed var(--border); border-radius: 12px; padding: 2rem; background:var(--card); color: var(--fg); }
+    .empty-state .icon { font-size: 2rem; margin-bottom: .5rem; }
+    .empty-state h3 { margin: 0 0 .25rem 0; color: var(--fg); font-size: 1.1rem; font-weight: 600; }
+    .empty-state p { margin: 0; color: var(--muted); font-size: .95rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -450,29 +187,212 @@ class MedicalRAGSystem:
         self.chroma_path = "vector_db/chroma"
         self.ollama_model = "llama3"
         self.num_results = 3
+        self.http = _http_session()
         
         # Initialize models
         self._load_models()
         self._connect_databases()
+
+    def extract_template_outline(self, template_bytes: bytes) -> list[str]:
+        """Extract an ordered list of section headings from a PDF template.
+
+        Heuristic: collect lines that look like headings (short, Title/ALLCAPS, or end with ':').
+        Returns a de-duplicated ordered list.
+        """
+        try:
+            reader = PdfReader(BytesIO(template_bytes))
+            text = []
+            # Inspect first 3 pages for headings
+            for i, page in enumerate(reader.pages[:3]):
+                try:
+                    text.append(page.extract_text() or "")
+                except Exception:
+                    continue
+            joined = "\n".join(text)
+            lines = [l.strip() for l in joined.splitlines()]
+            candidates: list[str] = []
+            for line in lines:
+                if not line:
+                    continue
+                if len(line) < 3 or len(line) > 80:
+                    continue
+                # Skip page numbers and dates
+                if line.lower().startswith("page "):
+                    continue
+                # Heuristic rules
+                looks_like_heading = (
+                    line.endswith(":") or
+                    (line.isupper() and any(c.isalpha() for c in line)) or
+                    (line.istitle() and sum(ch.isalpha() for ch in line) >= 6)
+                )
+                if looks_like_heading:
+                    normalized = line.rstrip(":").strip()
+                    if normalized not in candidates:
+                        candidates.append(normalized)
+            # Keep a reasonable number
+            return candidates[:30] if candidates else []
+        except Exception:
+            return []
+
+    def generate_discharge_summary_with_template(self, patient_data: str, outline_sections: list[str]) -> str:
+        """Generate discharge summary following the provided ordered outline sections."""
+        outline_bullets = "\n".join([f"- {s}" for s in outline_sections])
+        system_prompt = f"""You are an expert medical AI assistant that generates a clinically accurate discharge summary.
+Follow the section order EXACTLY as specified by the provided outline. Do not add extra sections; if information is missing, write "[Information not available]".
+
+REQUIRED SECTION ORDER (USE EXACT TITLES):
+{outline_bullets}
+
+Rules:
+- Use concise, professional medical language.
+- Do not invent data; base content solely on the input patient data.
+- Preserve patient identifiers verbatim if present.
+"""
+
+        user_prompt = f"""Generate a discharge summary STRICTLY following the section list above, based only on this data:\n\n{patient_data}\n\nReturn plain text with the exact section headings in order."""
+
+        try:
+            response = self.http.post(
+                "http://localhost:11434/api/chat",
+                json={
+                    "model": self.ollama_model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    "stream": True,
+                    "options": {
+                        "temperature": 0.4,
+                        "top_p": 0.9,
+                        "max_tokens": 700
+                    }
+                },
+                timeout=60
+            )
+            if response.ok:
+                full_response = ""
+                for line in response.iter_lines(decode_unicode=True):
+                    if not line:
+                        continue
+                    try:
+                        json_data = json.loads(line)
+                        if 'message' in json_data and 'content' in json_data['message']:
+                            full_response += json_data['message']['content']
+                    except json.JSONDecodeError:
+                        continue
+                return full_response.strip()
+            else:
+                return f"❌ Error generating summary: {response.text}"
+        except Exception as e:
+            return f"❌ Error connecting to Ollama: {str(e)}"
+
+    def generate_pdf_from_text(self, text: str, template_bytes: bytes | None = None) -> bytes:
+        """Generate a PDF from plain text. If a PDF template is provided, overlay text pages on template pages.
+
+        Args:
+            text: The discharge summary text
+            template_bytes: Raw bytes of a PDF template (optional)
+        Returns:
+            PDF file bytes
+        """
+        # Determine page size: use template first page if provided, else A4
+        page_size = A4
+        template_reader = None
+        if template_bytes:
+            try:
+                template_reader = PdfReader(BytesIO(template_bytes))
+                first_page = template_reader.pages[0]
+                width = float(first_page.mediabox.width)
+                height = float(first_page.mediabox.height)
+                page_size = (width, height)
+            except Exception:
+                template_reader = None
+
+        # Build a PDF with flowing text
+        buf = BytesIO()
+        doc = SimpleDocTemplate(buf, pagesize=page_size, rightMargin=54, leftMargin=54, topMargin=54, bottomMargin=54)
+        styles = getSampleStyleSheet()
+        body_style = ParagraphStyle(
+            name="Body",
+            parent=styles["Normal"],
+            fontName="Helvetica",
+            fontSize=10.5,
+            leading=14,
+            alignment=TA_LEFT,
+        )
+        story = []
+        for para in text.split("\n\n"):
+            story.append(Paragraph(para.replace("\n", "<br/>"), body_style))
+            story.append(Spacer(1, 0.18 * inch))
+        doc.build(story)
+        generated_pdf_bytes = buf.getvalue()
+
+        # If no template, return generated bytes directly
+        if not template_reader:
+            return generated_pdf_bytes
+
+        # Merge generated pages onto template pages
+        gen_reader = PdfReader(BytesIO(generated_pdf_bytes))
+        writer = PdfWriter()
+        num_pages = max(len(template_reader.pages), len(gen_reader.pages))
+
+        for i in range(num_pages):
+            template_page = None
+            if i < len(template_reader.pages):
+                template_page = template_reader.pages[i]
+
+            if i < len(gen_reader.pages):
+                gen_page = gen_reader.pages[i]
+                if template_page is not None:
+                    try:
+                        # Overlay generated content on top of template background
+                        template_page.merge_page(gen_page)
+                        writer.add_page(template_page)
+                    except Exception:
+                        # Fallback to adding generated page if merge fails
+                        writer.add_page(gen_page)
+                else:
+                    writer.add_page(gen_page)
+            else:
+                # No generated content for this page, keep template page
+                if template_page is not None:
+                    writer.add_page(template_page)
+
+        out_buf = BytesIO()
+        writer.write(out_buf)
+        return out_buf.getvalue()
+
+    def generate_docx_from_text(self, text: str) -> bytes:
+        """Generate a DOCX file from plain text, preserving paragraphs and line breaks."""
+        doc = Document()
+        # Add title if the first line looks like a heading
+        lines = text.split("\n")
+        if lines and len(lines[0]) <= 120 and any(ch.isalpha() for ch in lines[0]):
+            doc.add_heading(lines[0].strip(), level=1)
+            text = "\n".join(lines[1:])
+        for block in text.split("\n\n"):
+            for ln in block.split("\n"):
+                doc.add_paragraph(ln)
+            doc.add_paragraph("")
+        buf = BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
     
     def _load_models(self):
         """Load Bio ClinicalBERT model for embeddings"""
         with st.spinner("Loading Bio ClinicalBERT model..."):
-            self.tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
-            self.model = AutoModel.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
-            self.model.eval()
+            self.tokenizer, self.model = _load_tokenizer_model()
     
     def _connect_databases(self):
         """Connect to MongoDB and ChromaDB"""
         try:
             # MongoDB connection
-            self.mongo_client = MongoClient(self.mongo_uri)
+            self.mongo_client = _connect_mongo(self.mongo_uri)
             self.db = self.mongo_client["hospital_db"]
             self.patients_collection = self.db["test_patients"]
             
             # ChromaDB connection
-            self.chroma_client = chromadb.PersistentClient(path=self.chroma_path)
-            self.chroma_collection = self.chroma_client.get_or_create_collection("patient_embeddings")
+            self.chroma_client, self.chroma_collection = _connect_chroma(self.chroma_path)
             
             st.success("✅ Connected to databases successfully")
         except Exception as e:
@@ -481,10 +401,15 @@ class MedicalRAGSystem:
     def embed_text(self, text: str) -> List[float]:
         """Generate embedding for text using Bio ClinicalBERT"""
         with torch.no_grad():
-            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+            inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=256)
+            if torch.cuda.is_available():
+                inputs = {k: v.to("cuda") for k, v in inputs.items()}
             outputs = self.model(**inputs)
             cls_embedding = outputs.last_hidden_state[:, 0, :]
-            return cls_embedding.squeeze(0).tolist()
+            emb = cls_embedding.squeeze(0)
+            if emb.is_cuda:
+                emb = emb.to("cpu")
+            return emb.tolist()
     
     def format_patient_fields(self, record: Dict) -> str:
         """Format patient record fields for embedding"""
@@ -552,7 +477,7 @@ Maintain a professional, objective medical tone. Do not add conversational phras
 **Reminder:** Extract and display the patient's Name, Unit No, Date of Birth, and Sex exactly as provided at the top of the discharge summary. Do not skip or modify them."""
 
         try:
-            response = requests.post(
+            response = self.http.post(
                 "http://localhost:11434/api/chat",
                 json={
                     "model": self.ollama_model,
@@ -560,20 +485,22 @@ Maintain a professional, objective medical tone. Do not add conversational phras
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "stream": False
-                }
+                    "stream": True
+                },
+                timeout=60
             )
 
             if response.ok:
                 full_response = ""
                 for line in response.iter_lines(decode_unicode=True):
-                    if line:
-                        try:
-                            json_data = json.loads(line)
-                            if 'message' in json_data and 'content' in json_data['message']:
-                                full_response += json_data['message']['content']
-                        except json.JSONDecodeError:
-                            continue
+                    if not line:
+                        continue
+                    try:
+                        json_data = json.loads(line)
+                        if 'message' in json_data and 'content' in json_data['message']:
+                            full_response += json_data['message']['content']
+                    except json.JSONDecodeError:
+                        continue
                 return full_response.strip()
             else:
                 return f"❌ Error generating summary: {response.text}"
@@ -623,8 +550,8 @@ class AutoGenMedicalAgent:
             Provide helpful, accurate, and professional responses about medical topics. 
             Keep responses concise and focused. If asked about generating a discharge summary, guide the user to use the 'Generate Summary' button."""
             
-            # Optimize request for faster response
-            response = requests.post(
+            # Optimize request for faster response (reuse session)
+            response = self.rag_system.http.post(
                 "http://localhost:11434/api/chat",
                 json={
                     "model": "llama3",
@@ -632,14 +559,14 @@ class AutoGenMedicalAgent:
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": f"{message}{context}"}
                     ],
-                    "stream": False,
+                    "stream": True,
                     "options": {
-                        "temperature": 0.7,
+                        "temperature": 0.6,
                         "top_p": 0.9,
-                        "max_tokens": 500  # Limit response length for faster generation
+                        "max_tokens": 250
                     }
                 },
-                timeout=30  # Add timeout for faster failure detection
+                timeout=45
             )
             
             if response.ok:
@@ -662,15 +589,7 @@ class AutoGenMedicalAgent:
             return f"❌ Error in fallback chat: {str(e)}"
 
 def main():
-    # Header
-    st.markdown("""
-    <div class="main-header">
-        <h1>🏥 Medical Discharge Summary Assistant</h1>
-        <p>AI-Powered Clinical Documentation with RAG and AutoGen Integration</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Initialize RAG system
+    # Initialize RAG system early to guarantee availability for sidebar callbacks
     if 'rag_system' not in st.session_state:
         with st.spinner("Initializing Medical RAG System..."):
             try:
@@ -680,6 +599,43 @@ def main():
             except Exception as e:
                 st.error(f"❌ Failed to initialize system: {str(e)}")
                 st.stop()
+
+    # Sidebar preferences and CSS
+    with st.sidebar:
+        st.header("⚙️ Preferences")
+        minimal_ui = st.checkbox("Minimal UI", value=st.session_state.get('minimal_ui', False))
+        st.session_state.minimal_ui = minimal_ui
+
+        st.markdown("---")
+        st.header("📎 Insurance Template")
+        template_file = st.file_uploader("Upload PDF template (optional)", type=["pdf"], accept_multiple_files=False)
+        if template_file is not None:
+            st.session_state["template_pdf_bytes"] = template_file.read()
+            # Extract outline from template (module-level helper to avoid class ordering issues)
+            outline = extract_template_outline(st.session_state["template_pdf_bytes"])
+            if outline:
+                st.session_state["template_outline"] = outline
+                st.success("Template loaded. Outline detected and will be used for generation.")
+                with st.expander("Detected Section Order"):
+                    for s in outline:
+                        st.write(f"• {s}")
+            else:
+                st.session_state.pop("template_outline", None)
+                st.warning("Template loaded but no clear section outline was detected. Will generate standard summary.")
+        elif "template_pdf_bytes" not in st.session_state:
+            st.info("No template uploaded. Summaries will be generated as plain text or basic PDF.")
+
+    st.markdown(_get_css(st.session_state.get('minimal_ui', False)), unsafe_allow_html=True)
+
+    # Header
+    st.markdown("""
+    <div class="main-header">
+        <h1>🏥 Medical Discharge Summary Assistant</h1>
+        <p>AI-Powered Clinical Documentation with RAG and AutoGen Integration</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    # RAG system is already initialized above
     
     # Sidebar for patient search
     with st.sidebar:
@@ -839,8 +795,17 @@ def main():
                     with st.spinner("📝 Generating discharge summary..."):
                         try:
                             patient_text = st.session_state.rag_system.format_patient_fields(st.session_state.current_patient)
-                            summary = st.session_state.rag_system.generate_discharge_summary(patient_text)
+                            # If a template outline exists, follow it strictly
+                            if "template_outline" in st.session_state and st.session_state.template_outline:
+                                summary = st.session_state.rag_system.generate_discharge_summary_with_template(patient_text, st.session_state.template_outline)
+                            else:
+                                summary = st.session_state.rag_system.generate_discharge_summary(patient_text)
                             st.session_state.discharge_summary = summary
+                            # Build PDF (with template if provided)
+                            template_bytes = st.session_state.get("template_pdf_bytes", None)
+                            # For template mode, generate a clean PDF using the template's page size but avoid overlaying duplicate headings
+                            pdf_bytes = st.session_state.rag_system.generate_pdf_from_text(summary, template_bytes=None if st.session_state.get("template_outline") else template_bytes)
+                            st.session_state.discharge_summary_pdf = pdf_bytes
                             st.success("✅ Discharge summary generated!")
                         except Exception as e:
                             st.error(f"❌ Error generating summary: {str(e)}")
@@ -889,33 +854,68 @@ This patient is ready for discharge summary generation."""
         
         else:
             st.markdown("""
-            <div style="text-align: center; padding: 3rem; background: linear-gradient(135deg, #f8f9fa 0%, #ffffff 100%); border-radius: 15px; border: 2px dashed #dee2e6;">
-                <div style="font-size: 3rem; margin-bottom: 1rem;">👈</div>
-                <h3 style="color: var(--text-dark); margin-bottom: 1rem;">Search for a Patient</h3>
-                <p style="color: var(--text-light); margin: 0;">Please search for a patient in the sidebar to start the conversation with the AI assistant.</p>
+            <div class="empty-state">
+                <div class="icon">👈</div>
+                <h3>Search for a Patient</h3>
+                <p>Please search for a patient in the sidebar to start the conversation with the AI assistant.</p>
             </div>
             """, unsafe_allow_html=True)
     
     with col2:
         st.header("📋 Generated Content")
         
-        # Display discharge summary
+        # Display discharge summary (editable)
         if st.session_state.discharge_summary:
             st.markdown("""
             <div class="summary-card">
-                <h3>📄 Discharge Summary</h3>
+                <h3>📄 Discharge Summary (Editable)</h3>
             </div>
             """, unsafe_allow_html=True)
-            
-            st.markdown(st.session_state.discharge_summary)
-            
-            # Download button
+
+            if "editable_summary" not in st.session_state:
+                st.session_state.editable_summary = st.session_state.discharge_summary
+
+            st.session_state.editable_summary = st.text_area(
+                "editable_summary",
+                value=st.session_state.editable_summary,
+                height=500,
+                label_visibility="collapsed"
+            )
+
+            col_save, col_reset = st.columns([1,1])
+            with col_save:
+                if st.button("💾 Save Edits", use_container_width=True):
+                    st.session_state.discharge_summary = st.session_state.editable_summary
+                    st.success("Saved your edits.")
+            with col_reset:
+                if st.button("↩️ Reset to Generated", use_container_width=True):
+                    st.session_state.editable_summary = st.session_state.discharge_summary
+
+            # Plain text download
             st.download_button(
-                label="📥 Download Summary",
-                data=st.session_state.discharge_summary,
+                label="📥 Download as .txt",
+                data=st.session_state.editable_summary,
                 file_name=f"discharge_summary_{st.session_state.current_patient.get('unit no', 'unknown')}.txt",
                 mime="text/plain"
             )
+
+            # DOCX download
+            docx_bytes = st.session_state.rag_system.generate_docx_from_text(st.session_state.editable_summary)
+            st.download_button(
+                label="📝 Download as .docx",
+                data=docx_bytes,
+                file_name=f"discharge_summary_{st.session_state.current_patient.get('unit no', 'unknown')}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+
+            # PDF download (optional template mode)
+            if "discharge_summary_pdf" in st.session_state and st.session_state.discharge_summary_pdf:
+                st.download_button(
+                    label="🧾 Download PDF (Template Applied)",
+                    data=st.session_state.discharge_summary_pdf,
+                    file_name=f"discharge_summary_{st.session_state.current_patient.get('unit no', 'unknown')}.pdf",
+                    mime="application/pdf"
+                )
         
         # Display similar cases
         if hasattr(st.session_state, 'similar_cases') and st.session_state.similar_cases:
@@ -938,27 +938,27 @@ This patient is ready for discharge summary generation."""
     with col_status1:
         st.markdown("""
         <div class="metric-card">
-            <h4 style="color: var(--success-green); margin-bottom: 0.5rem;">Database Status</h4>
-            <p style="font-size: 1.5rem; margin: 0; color: var(--text-dark);">🟢 Connected</p>
-            <p style="color: var(--text-light); margin: 0.5rem 0 0 0;">MongoDB + ChromaDB</p>
+            <h4>Database Status</h4>
+            <p>🟢 Connected</p>
+            <p style="color: var(--muted);">MongoDB + ChromaDB</p>
         </div>
         """, unsafe_allow_html=True)
     
     with col_status2:
         st.markdown("""
         <div class="metric-card">
-            <h4 style="color: var(--success-green); margin-bottom: 0.5rem;">AI Model</h4>
-            <p style="font-size: 1.5rem; margin: 0; color: var(--text-dark);">🟢 Ready</p>
-            <p style="color: var(--text-light); margin: 0.5rem 0 0 0;">Bio ClinicalBERT + LLaMA 3</p>
+            <h4>AI Model</h4>
+            <p>🟢 Ready</p>
+            <p style="color: var(--muted);">Bio ClinicalBERT + LLaMA 3</p>
         </div>
         """, unsafe_allow_html=True)
     
     with col_status3:
         st.markdown("""
         <div class="metric-card">
-            <h4 style="color: var(--success-green); margin-bottom: 0.5rem;">AI Assistant</h4>
-            <p style="font-size: 1.5rem; margin: 0; color: var(--text-dark);">🟢 Active</p>
-            <p style="color: var(--text-light); margin: 0.5rem 0 0 0;">Medical Assistant</p>
+            <h4>AI Assistant</h4>
+            <p>🟢 Active</p>
+            <p style="color: var(--muted);">Medical Assistant</p>
         </div>
         """, unsafe_allow_html=True)
 
