@@ -57,7 +57,7 @@ def extract_template_outline(template_bytes: bytes) -> List[str]:
 
 # Try to import autogen, but make it optional
 try:
-    import autogen
+    import pyautogen
     AUTOGEN_AVAILABLE = True
 except ImportError:
     AUTOGEN_AVAILABLE = False
@@ -266,8 +266,7 @@ Rules:
                         "top_p": 0.9,
                         "max_tokens": 700
                     }
-                },
-                timeout=60
+                }
             )
             if response.ok:
                 full_response = ""
@@ -486,8 +485,7 @@ Maintain a professional, objective medical tone. Do not add conversational phras
                         {"role": "user", "content": user_prompt}
                     ],
                     "stream": True
-                },
-                timeout=60
+                }
             )
 
             if response.ok:
@@ -507,6 +505,58 @@ Maintain a professional, objective medical tone. Do not add conversational phras
         except Exception as e:
             return f"❌ Error connecting to Ollama: {str(e)}"
 
+    # --- START: NEW FEEDBACK LOOP METHOD ---
+    def add_summary_to_vector_db(self, patient_info: Dict, summary_text: str):
+        """
+        Embeds the finalized discharge summary and adds it to the ChromaDB collection.
+        This serves as the feedback loop, adding a high-quality, human-reviewed
+        document back into the RAG system.
+        """
+        if not summary_text or not patient_info:
+            st.warning("No summary text or patient info available to add.")
+            return False
+
+        unit_no = patient_info.get('unit no', 'unknown')
+        patient_name = patient_info.get('name', 'Unknown')
+        
+        try:
+            # 1. Generate embedding for the new summary
+            summary_embedding = self.embed_text(summary_text)
+            
+            # 2. Prepare a unique ID
+            # Using unit_no and timestamp allows for multiple summary versions
+            doc_id = f"summary_{unit_no}_{int(time.time())}"
+            
+            # 3. Prepare metadata
+            metadata = {
+                "unit_no": str(unit_no),
+                "name": patient_name,
+                "summary": summary_text[:500],  # Store a preview in metadata
+                "source_type": "feedback_summary" # Tag this as a human-reviewed entry
+            }
+            
+            # 4. Add to ChromaDB
+            self.chroma_collection.add(
+                embeddings=[summary_embedding],
+                documents=[summary_text],  # Store the full summary as the document
+                metadatas=[metadata],
+                ids=[doc_id]
+            )
+            
+            # 5. Show notification (as requested)
+            # st.toast is available in newer Streamlit; fall back to success if missing
+            try:
+                st.toast(f"Database updated: Summary for {unit_no} added.", icon="✅")
+            except Exception:
+                st.success(f"Database updated: Summary for {unit_no} added.")
+            return True
+        
+        except Exception as e:
+            st.error(f"❌ Error adding feedback summary to vector DB: {str(e)}")
+            st.exception(e) # Print full error
+            return False
+    # --- END: NEW FEEDBACK LOOP METHOD ---
+    
 class AutoGenMedicalAgent:
     def __init__(self, rag_system: MedicalRAGSystem):
         self.rag_system = rag_system
@@ -565,8 +615,7 @@ class AutoGenMedicalAgent:
                         "top_p": 0.9,
                         "max_tokens": 250
                     }
-                },
-                timeout=45
+                }
             )
             
             if response.ok:
@@ -874,22 +923,47 @@ This patient is ready for discharge summary generation."""
 
             if "editable_summary" not in st.session_state:
                 st.session_state.editable_summary = st.session_state.discharge_summary
+            # Use current discharge_summary if editable_summary is empty or reset
+            elif not st.session_state.editable_summary:
+                st.session_state.editable_summary = st.session_state.discharge_summary
 
             st.session_state.editable_summary = st.text_area(
-                "editable_summary",
-                value=st.session_state.editable_summary,
-                height=500,
-                label_visibility="collapsed"
-            )
+                 "editable_summary",
+                 value=st.session_state.editable_summary,
+                 height=500,
+                 label_visibility="collapsed"
+             )
 
             col_save, col_reset = st.columns([1,1])
             with col_save:
-                if st.button("💾 Save Edits", use_container_width=True):
-                    st.session_state.discharge_summary = st.session_state.editable_summary
-                    st.success("Saved your edits.")
+                 if st.button("💾 Save Edits", use_container_width=True):
+                     st.session_state.discharge_summary = st.session_state.editable_summary
+                     st.success("Saved your edits.")
             with col_reset:
-                if st.button("↩️ Reset to Generated", use_container_width=True):
+                 if st.button("↩️ Reset to Generated", use_container_width=True):
                     st.session_state.editable_summary = st.session_state.discharge_summary
+                    st.rerun() # Rerun to ensure text_area updates
+
+            # --- START: NEW FEEDBACK LOOP UI ---
+            st.markdown("---")
+            st.markdown("### 🧠 RAG Feedback Loop")
+            
+            if st.button("Commit Summary to Knowledgebase", 
+                         type="primary", 
+                         use_container_width=True, 
+                         help="Embed this summary and add it to the RAG system for future 'similar cases' searches."):
+                
+                if st.session_state.editable_summary and st.session_state.current_patient:
+                    with st.spinner("Embedding summary and updating knowledgebase..."):
+                        st.session_state.rag_system.add_summary_to_vector_db(
+                            st.session_state.current_patient,
+                            st.session_state.editable_summary
+                        )
+                else:
+                    st.warning("Please ensure a patient is loaded and a summary is present.")
+            # --- END: NEW FEEDBACK LOOP UI ---
+            
+            st.markdown("---") # Added a separator
 
             # Plain text download
             st.download_button(

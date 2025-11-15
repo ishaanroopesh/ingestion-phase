@@ -17,7 +17,7 @@ def check_requirements():
         import chromadb
         import pymongo
         import transformers
-        import autogen
+        import pyautogen
         print("✅ All required packages are installed")
         return True
     except ImportError as e:

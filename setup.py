@@ -103,7 +103,7 @@ def test_imports():
         "requests",
         "pymongo",
         "transformers",
-        "autogen",
+        "pyautogen",
         "numpy",
         "tqdm"
     ]
