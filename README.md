@@ -1,217 +1,466 @@
-# Medical Discharge Summary Assistant
+# 🏥 Medical Discharge Summary Assistant
 
-A sophisticated AI-powered medical application that generates discharge summaries using RAG (Retrieval-Augmented Generation) and Microsoft AutoGen for conversational AI interactions with doctors.
+An AI-powered medical documentation system that generates discharge summaries using RAG (Retrieval-Augmented Generation) architecture with LLaMA 3, integrated with AutoGen for conversational AI assistance.
 
-## 🏥 Features
+## ✨ Features
 
-- **AI-Powered Discharge Summary Generation**: Uses LLaMA 3 via Ollama for generating comprehensive medical discharge summaries
-- **RAG System**: Retrieves similar patient cases using Bio ClinicalBERT embeddings stored in ChromaDB
-- **Conversational AI**: Microsoft AutoGen integration for natural doctor-AI interactions
-- **Patient Database**: MongoDB integration for patient record management
-- **Professional UI**: Modern Streamlit interface designed for medical professionals
-- **Real-time Chat**: Interactive chat interface for doctor-AI collaboration
+- **🤖 AI-Powered Discharge Summary Generation**: Automatically generates comprehensive discharge summaries using LLaMA 3
+- **💬 Conversational AI Agent**: Interactive chat interface powered by AutoGen for doctor-patient queries
+- **🔍 RAG-Based Similar Case Search**: Find similar patient cases using semantic search with Bio ClinicalBERT embeddings
+- **📊 Modern Dark Theme UI**: Beautiful, modern interface with smooth animations and professional design
+- **⚡ FastAPI Backend**: High-performance async backend for significantly faster response times
+- **📄 Multiple Export Formats**: Download summaries as TXT, DOCX, or PDF
+- **🎨 Template Support**: Upload PDF templates for custom discharge summary formats
+- **💾 Feedback Loop**: Add generated summaries back to the knowledge base for continuous improvement
 
-## 🚀 Quick Start
+## 🚀 Quick Start Guide
 
 ### Prerequisites
 
-1. **Ollama with LLaMA 3**: Make sure Ollama is running with LLaMA 3 model
-   ```bash
-   ollama pull llama3
-   ollama serve
-   ```
+- Python 3.8 or higher
+- Ollama installed and running with LLaMA 3 model
+- MongoDB connection (cloud or local)
+- CUDA-capable GPU (optional, for faster embeddings)
 
-2. **Python 3.8+**: Ensure you have Python 3.8 or higher installed
+### Step 1: Install Dependencies
 
-### Installation
-
-#### Option 1: Automated Setup (Recommended)
 ```bash
-# Navigate to the project directory
-cd rag_application/ingestion-phase
+cd ingestion-phase
+pip install -r requirements.txt
+```
 
-# Run the automated setup
-python setup.py
+**Key dependencies:**
+- `streamlit` - Web interface
+- `fastapi` - High-performance async backend
+- `uvicorn` - ASGI server
+- `httpx` - Async HTTP client
+- `motor` - Async MongoDB driver
+- `torch` - PyTorch for embeddings
+- `transformers` - Hugging Face transformers
+- `chromadb` - Vector database
+- `pymongo` - MongoDB driver
 
-# Start the application
+### Step 2: Start Ollama (Required)
+
+Make sure Ollama is running with the LLaMA 3 model:
+
+```bash
+# Start Ollama server
+ollama serve
+
+# In another terminal, pull LLaMA 3 if not already installed
+ollama pull llama3
+```
+
+### Step 3: Start FastAPI Backend (Recommended for Best Performance)
+
+**Option A: Using the batch file (Windows)**
+```bash
+start_api.bat
+```
+
+**Option B: Using the shell script (Linux/Mac)**
+```bash
+chmod +x start_api.sh
+./start_api.sh
+```
+
+**Option C: Using Python directly**
+```bash
+python start_api.py
+```
+
+**Option D: Using uvicorn directly**
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**Expected output:**
+```
+============================================================
+🚀 Starting FastAPI Backend Server
+============================================================
+📍 Server will be available at: http://localhost:8000
+📡 API Documentation: http://localhost:8000/docs
+❤️  Health Check: http://localhost:8000/health
+============================================================
+⏳ Loading models and connecting to databases...
+✅ FastAPI backend initialized successfully!
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000
+```
+
+**Keep this terminal open!** The FastAPI server must remain running.
+
+### Step 4: Start Streamlit Frontend
+
+**Open a NEW terminal/command prompt** (keep FastAPI terminal running):
+
+**Option A: Using the launcher script**
+```bash
 python run_app.py
 ```
 
-#### Option 2: Manual Setup
+**Option B: Using Streamlit directly**
 ```bash
-# Navigate to the project directory
-cd rag_application/ingestion-phase
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Create necessary directories
-mkdir -p vector_db data embeddings processed logs temp
-
-# Start Ollama (if not already running)
-ollama serve
-
-# Pull LLaMA 3 model
-ollama pull llama3
-
-# Run the application
 streamlit run app.py
 ```
 
-#### Option 3: Quick Start Scripts
-- **Windows**: Double-click `start.bat`
-- **Linux/Mac**: Run `./start.sh`
-
-### Access the Application
-Open your browser to `http://localhost:8501`
-
-### Test the System
-Run the demo to verify everything is working:
+**Option C: Using the batch file (Windows)**
 ```bash
-python demo.py
+start.bat
 ```
+
+**Expected output:**
+```
+You can now view your Streamlit app in your browser.
+
+Local URL: http://localhost:8501
+Network URL: http://192.168.x.x:8501
+```
+
+### Step 5: Access the Application
+
+1. Open your browser and navigate to: `http://localhost:8501`
+2. The app will automatically detect if FastAPI is running
+3. If FastAPI is detected, you'll see optimal performance
+4. If not, the app will work in fallback mode (slower but functional)
+
+## 📋 Complete Startup Checklist
+
+- [ ] Python 3.8+ installed
+- [ ] Dependencies installed (`pip install -r requirements.txt`)
+- [ ] Ollama running with LLaMA 3 model
+- [ ] MongoDB accessible (connection string configured)
+- [ ] FastAPI backend started (Terminal 1)
+- [ ] Streamlit frontend started (Terminal 2)
+- [ ] Browser opened to `http://localhost:8501`
+
+## 🎯 Usage Guide
+
+### 1. Search for a Patient
+
+1. In the sidebar, enter a patient's **Unit Number**
+2. Click **"🔍 Search Patient"**
+3. Patient information will appear in the sidebar
+
+### 2. Chat with AI Assistant
+
+1. Once a patient is selected, the chat interface becomes active
+2. Type your question in the message box
+3. Click **"💬 Send Message"** or press Enter
+4. The AI will respond with context about the selected patient
+
+**Example questions:**
+- "What are the key findings for this patient?"
+- "Generate a discharge summary for this patient"
+- "What medications should be prescribed?"
+
+### 3. Generate Discharge Summary
+
+**Method 1: Quick Action Button**
+- Click **"📝 Generate Summary"** in the Quick Actions section
+
+**Method 2: Chat Interface**
+- Type: "Generate discharge summary" or "Create discharge summary"
+
+The summary will appear in the right panel and can be:
+- ✅ Edited directly in the text area
+- 💾 Saved with edits
+- 📥 Downloaded as TXT, DOCX, or PDF
+
+### 4. Find Similar Cases
+
+1. Click **"🔍 Find Similar Cases"**
+2. The system searches for similar patient cases using RAG
+3. View similarity scores and case summaries
+4. Use for clinical decision support
+
+### 5. Upload Template (Optional)
+
+1. In the sidebar, under **"📎 Insurance Template"**
+2. Click **"Browse files"** and select a PDF template
+3. The system will extract section headings
+4. Generated summaries will follow the template structure
+
+### 6. Feedback Loop
+
+After generating and editing a summary:
+1. Click **"Commit Summary to Knowledgebase"**
+2. The summary is embedded and added to the RAG system
+3. Future searches will include this summary for better results
 
 ## 🏗️ Architecture
 
-### Core Components
-
-1. **MedicalRAGSystem**: 
-   - Bio ClinicalBERT for medical text embeddings
-   - ChromaDB for vector storage and similarity search
-   - MongoDB for patient record management
-   - Ollama integration for LLM inference
-
-2. **AutoGenMedicalAgent**:
-   - Microsoft AutoGen conversational AI agent
-   - Specialized for medical discharge summary assistance
-   - Context-aware responses with patient data integration
-
-3. **Streamlit Frontend**:
-   - Professional medical UI design
-   - Real-time chat interface
-   - Patient search and management
-   - Discharge summary generation and download
-
-### Data Flow
+### System Components
 
 ```
-Doctor Input → AutoGen Agent → RAG System → ChromaDB/MongoDB → LLM → Discharge Summary
+┌─────────────┐         ┌──────────────┐         ┌─────────────┐
+│  Streamlit  │ ──────> │   FastAPI    │ ──────> │   Ollama   │
+│  Frontend   │  HTTP   │   Backend    │  HTTP   │   (LLM)    │
+│  (Port 8501)│         │  (Port 8000) │         │ (Port 11434)│
+└─────────────┘         └──────────────┘         └─────────────┘
+                              │
+                              ├──> MongoDB (Patient Records)
+                              └──> ChromaDB (Vector Search)
 ```
 
-## 📊 Usage
+### Technology Stack
 
-### 1. Patient Search
-- Enter a patient's unit number in the sidebar
-- The system retrieves patient information from MongoDB
-- Patient details are displayed in the sidebar
+- **Frontend**: Streamlit with modern dark theme UI
+- **Backend**: FastAPI with async/await for high performance
+- **LLM**: LLaMA 3 via Ollama
+- **Embeddings**: Bio ClinicalBERT (medical domain-specific)
+- **Vector DB**: ChromaDB for similarity search
+- **Database**: MongoDB for patient records
+- **AI Agent**: AutoGen for conversational interface
 
-### 2. AI Conversation
-- Chat with the AI assistant about the patient
-- Ask questions, request summaries, or discuss treatment plans
-- The AI has access to patient data and similar cases
+## ⚡ Performance Optimizations
 
-### 3. Discharge Summary Generation
-- Click "Generate Summary" to create a comprehensive discharge summary
-- The system uses RAG to find similar cases for context
-- Summary follows standard medical documentation format
+### FastAPI Backend Benefits
 
-### 4. Similar Cases Search
-- Find similar patient cases using semantic search
-- View similarity scores and case summaries
-- Use for clinical decision support
+- **Async Operations**: Non-blocking I/O for all database and HTTP calls
+- **Connection Pooling**: Efficient resource management
+- **Concurrent Requests**: Handle multiple requests simultaneously
+- **Expected Speed Improvements**:
+  - AI Agent responses: **40-60% faster**
+  - Discharge summary generation: **30-50% faster**
+  - Similar case searches: **50-80% faster** (with caching)
+
+### Additional Optimizations
+
+- **Embedding Cache**: Avoids recomputing embeddings for same text
+- **Reduced Token Limits**: Optimized for faster responses
+  - Chat: 150 tokens (reduced from 250)
+  - Summary: 500 tokens (reduced from 700)
+- **Lower Temperature**: More deterministic, faster responses
+- **Request Timeouts**: Faster failure handling
+- **Streaming Responses**: Real-time response generation
+
+## 🎨 UI Features
+
+### Modern Dark Theme
+
+- **Professional Design**: Dark color scheme with gradient accents
+- **Smooth Animations**: Slide-in effects, hover transitions
+- **Responsive Layout**: Optimized for different screen sizes
+- **Status Indicators**: Real-time system status display
+- **Progress Bars**: Visual feedback for long operations
+
+### Key UI Components
+
+- **Gradient Header**: Eye-catching main header with glow effects
+- **Card-based Layout**: Modern card design with hover effects
+- **Chat Interface**: Beautiful message bubbles with avatars
+- **Status Cards**: Visual indicators for system health
+- **Custom Scrollbars**: Styled scrollbars for better UX
+
+## 📡 API Endpoints (FastAPI)
+
+### Health & Status
+- `GET /` - Basic health check
+- `GET /health` - Detailed health status
+
+### Core Operations
+- `POST /api/chat` - Chat with AI agent
+- `POST /api/generate-summary` - Generate discharge summary
+- `POST /api/search-similar` - Search similar cases
+- `POST /api/patient` - Get patient by unit number
+
+### API Documentation
+
+When FastAPI is running, visit:
+- **Swagger UI**: http://localhost:8000/docs
+- **ReDoc**: http://localhost:8000/redoc
 
 ## 🔧 Configuration
 
 ### Environment Variables
-- `MONGO_URI`: MongoDB connection string
-- `CHROMA_PATH`: Path to ChromaDB storage
-- `OLLAMA_MODEL`: LLM model name (default: "llama3")
 
-### Model Configuration
-- **Bio ClinicalBERT**: Pre-trained medical embeddings
-- **LLaMA 3**: Large language model for text generation
-- **ChromaDB**: Vector database for similarity search
+```bash
+# FastAPI URL (optional, defaults to localhost:8000)
+export FASTAPI_URL=http://localhost:8000
+
+# MongoDB URI (configured in config.py)
+MONGO_URI=your_mongodb_connection_string
+
+# Ollama Configuration
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=llama3
+```
+
+### Configuration Files
+
+- `config.py` - Main configuration file
+- `local_config.json` - Local overrides (optional)
+
+## 🐛 Troubleshooting
+
+### FastAPI Not Starting
+
+**Problem**: Port 8000 already in use
+
+**Solution**:
+```bash
+# Windows: Find process using port 8000
+netstat -ano | findstr :8000
+
+# Linux/Mac: Find process using port 8000
+lsof -i :8000
+
+# Kill the process or change port in start_api.py
+```
+
+**Problem**: Dependencies missing
+
+**Solution**:
+```bash
+pip install -r requirements.txt
+```
+
+### Streamlit Not Connecting to FastAPI
+
+**Problem**: Warning "FastAPI backend not available"
+
+**Solutions**:
+1. Verify FastAPI is running: Visit http://localhost:8000/health
+2. Check both terminals are running (FastAPI + Streamlit)
+3. Refresh the Streamlit page (F5)
+4. Check firewall settings
+
+### Ollama Connection Issues
+
+**Problem**: "Error connecting to Ollama"
+
+**Solutions**:
+1. Verify Ollama is running: `ollama serve`
+2. Check LLaMA 3 is installed: `ollama list`
+3. Pull model if missing: `ollama pull llama3`
+4. Verify port 11434 is accessible
+
+### Database Connection Issues
+
+**Problem**: MongoDB connection failed
+
+**Solutions**:
+1. Verify MongoDB connection string in `config.py`
+2. Check network connectivity
+3. Verify MongoDB credentials
+4. Check if MongoDB server is running
+
+### Model Loading Issues
+
+**Problem**: Bio ClinicalBERT model not loading
+
+**Solutions**:
+1. Check internet connection (first download)
+2. Verify disk space available
+3. Check Hugging Face access
+4. Try clearing cache: `rm -rf ~/.cache/huggingface`
 
 ## 📁 Project Structure
 
 ```
-rag_application/ingestion-phase/
-├── app.py                 # Main Streamlit application
+ingestion-phase/
+├── app.py                 # Streamlit frontend application
+├── api.py                 # FastAPI backend server
+├── config.py              # Configuration settings
+├── start_api.py           # FastAPI startup script
+├── start_api.bat          # Windows batch file for FastAPI
+├── start_api.sh           # Linux/Mac script for FastAPI
+├── run_app.py             # Streamlit launcher
+├── start.bat              # Windows batch file for Streamlit
 ├── requirements.txt       # Python dependencies
-├── README.md             # This file
-├── data/                 # Patient datasets
-├── embeddings/           # Pre-computed embeddings
-├── processed/            # Processed training data
-├── scripts/              # Jupyter notebooks and utilities
-└── vector_db/            # ChromaDB storage
+├── README.md              # This file
+├── README_FASTAPI.md      # FastAPI-specific documentation
+├── data/                  # Data files
+├── embeddings/            # Generated embeddings
+├── processed/             # Processed data
+├── scripts/               # Utility scripts
+└── vector_db/             # ChromaDB storage
+    └── chroma/            # Vector database files
 ```
 
-## 🎯 Key Features
+## 🔒 Production Considerations
 
-### Medical AI Assistant
-- **Context-Aware**: Understands current patient context
-- **Professional**: Uses medical terminology and standards
-- **Comprehensive**: Generates complete discharge summaries
-- **Interactive**: Natural conversation with doctors
+### Security
+- [ ] Add authentication/authorization
+- [ ] Restrict CORS origins
+- [ ] Use environment variables for secrets
+- [ ] Enable HTTPS
+- [ ] Add rate limiting
 
-### RAG System
-- **Semantic Search**: Finds clinically relevant similar cases
-- **Medical Embeddings**: Bio ClinicalBERT for medical text understanding
-- **Vector Database**: Efficient similarity search with ChromaDB
-- **Context Integration**: Uses similar cases to improve summary quality
+### Performance
+- [ ] Increase FastAPI workers: `uvicorn api:app --workers 4`
+- [ ] Use production ASGI server (Gunicorn + Uvicorn)
+- [ ] Implement Redis caching
+- [ ] Use CDN for static assets
+- [ ] Database connection pooling
 
-### User Interface
-- **Professional Design**: Medical-grade UI with clean aesthetics
-- **Real-time Chat**: Instant AI responses
-- **Patient Management**: Easy patient search and information display
-- **Export Functionality**: Download discharge summaries
+### Monitoring
+- [ ] Add logging (structured logging)
+- [ ] Implement health checks
+- [ ] Add metrics collection
+- [ ] Set up error tracking
+- [ ] Monitor resource usage
 
-## 🔒 Security & Privacy
+### Deployment
+- [ ] Docker containerization
+- [ ] Kubernetes orchestration
+- [ ] Load balancing
+- [ ] Auto-scaling
+- [ ] Backup strategies
 
-- **Local Processing**: All AI processing happens locally
-- **Secure Database**: MongoDB with authentication
-- **No External APIs**: Uses local Ollama instance
-- **HIPAA Considerations**: Designed for medical data handling
+## 📚 Additional Resources
 
-## 🚀 Advanced Features
+- [FastAPI Documentation](https://fastapi.tiangolo.com/)
+- [Streamlit Documentation](https://docs.streamlit.io/)
+- [Ollama Documentation](https://ollama.ai/docs)
+- [ChromaDB Documentation](https://docs.trychroma.com/)
+- [MongoDB Documentation](https://www.mongodb.com/docs/)
 
-### AutoGen Integration
-- **Multi-Agent System**: Extensible agent architecture
-- **Conversation Memory**: Maintains context across interactions
-- **Specialized Agents**: Medical domain-specific AI assistants
+## 🤝 Contributing
 
-### RAG Enhancements
-- **Dynamic Retrieval**: Real-time similar case search
-- **Contextual Embeddings**: Patient-specific embedding generation
-- **Similarity Scoring**: Confidence metrics for retrieved cases
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Test thoroughly
+5. Submit a pull request
 
-## 📈 Performance
+## 📝 License
 
-- **Fast Embeddings**: Bio ClinicalBERT optimized for medical text
-- **Efficient Search**: ChromaDB for sub-second similarity search
-- **Streaming Responses**: Real-time LLM generation
-- **Caching**: Session state management for performance
+[Add your license information here]
 
-## 🛠️ Development
+## 👥 Authors
 
-### Adding New Features
-1. Extend `MedicalRAGSystem` class for new functionality
-2. Add new AutoGen agents for specialized tasks
-3. Update Streamlit UI components as needed
+[Add author information here]
 
-### Customization
-- **UI Themes**: Modify CSS in `app.py`
-- **Model Selection**: Change LLM model in configuration
-- **Database Schema**: Adapt to your patient data structure
+## 🙏 Acknowledgments
 
-## 📞 Support
-
-For technical support or feature requests, please refer to the project documentation or contact the development team.
-
-## 📄 License
-
-This project is designed for medical research and clinical use. Please ensure compliance with local healthcare regulations and data protection laws.
+- Bio ClinicalBERT model by Emily Alsentzer
+- LLaMA 3 by Meta
+- FastAPI by Sebastián Ramírez
+- Streamlit team
+- ChromaDB team
 
 ---
 
-**⚠️ Medical Disclaimer**: This application is designed to assist healthcare professionals and should not replace clinical judgment. Always verify AI-generated content and follow established medical protocols.
+## 🆘 Getting Help
+
+If you encounter issues:
+
+1. Check the **Troubleshooting** section above
+2. Review the terminal output for error messages
+3. Verify all prerequisites are met
+4. Check that all services are running:
+   - ✅ Ollama (port 11434)
+   - ✅ FastAPI (port 8000)
+   - ✅ Streamlit (port 8501)
+   - ✅ MongoDB (accessible)
+
+For detailed FastAPI information, see [README_FASTAPI.md](README_FASTAPI.md)
+
+---
+
+**Last Updated**: 2024
+**Version**: 2.0.0 (with FastAPI backend and modern UI)

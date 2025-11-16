@@ -24,3 +24,9 @@ pypdf>=4.2.0
 # Editable document export
 python-docx>=0.8.11
 
+# FastAPI and async support
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+httpx>=0.25.0
+motor>=3.3.0
+
