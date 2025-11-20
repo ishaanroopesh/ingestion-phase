@@ -14,6 +14,14 @@ PATIENTS_COLLECTION = "test_patients"
 
 # AI Model Configuration
 BIO_CLINICALBERT_MODEL = "emilyalsentzer/Bio_ClinicalBERT"
+
+# Groq API Configuration
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+GROQ_MODEL = "meta-llama/llama-4-maverick-17b-128e-instruct"
+GROQ_CHAT_ENDPOINT = f"{GROQ_BASE_URL}/chat/completions"
+
+# Legacy Ollama config (deprecated - kept for backward compatibility)
 OLLAMA_MODEL = "llama3"
 OLLAMA_BASE_URL = "http://localhost:11434"
 OLLAMA_CHAT_ENDPOINT = f"{OLLAMA_BASE_URL}/api/chat"
@@ -25,9 +33,9 @@ SIMILARITY_THRESHOLD = 0.7
 
 # AutoGen Configuration
 AUTOGEN_CONFIG = {
-    "model": "llama3",
-    "api_base": f"{OLLAMA_BASE_URL}/v1",
-    "api_key": "ollama",
+    "model": GROQ_MODEL,
+    "api_base": GROQ_BASE_URL,
+    "api_key": GROQ_API_KEY,
     "temperature": 0.7,
     "max_tokens": 2000,
 }
@@ -145,6 +153,8 @@ ERROR_MESSAGES = {
     "database_connection": "❌ Failed to connect to database",
     "model_loading": "❌ Failed to load AI model",
     "ollama_connection": "❌ Failed to connect to Ollama service",
+    "groq_connection": "❌ Failed to connect to Groq API",
+    "groq_api_key_missing": "❌ GROQ_API_KEY environment variable is not set",
     "embedding_generation": "❌ Failed to generate embeddings",
     "summary_generation": "❌ Failed to generate discharge summary",
     "similar_cases_search": "❌ Failed to search similar cases",
@@ -157,6 +167,7 @@ SUCCESS_MESSAGES = {
     "database_connected": "✅ Connected to database successfully",
     "model_loaded": "✅ AI model loaded successfully",
     "ollama_connected": "✅ Connected to Ollama service",
+    "groq_connected": "✅ Connected to Groq API",
     "summary_generated": "✅ Discharge summary generated successfully",
     "similar_cases_found": "✅ Similar cases found successfully",
     "autogen_ready": "✅ AutoGen agent ready"

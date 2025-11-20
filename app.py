@@ -4,9 +4,24 @@ import torch
 import chromadb
 import requests
 import json
+import os
 from pymongo import MongoClient
-from transformers import AutoTokenizer, AutoModel
+from bson import ObjectId
 from typing import Dict, List, Optional
+from dotenv import load_dotenv
+import math
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Try to import transformers, but make it optional
+try:
+    from transformers import AutoTokenizer, AutoModel
+    TRANSFORMERS_AVAILABLE = True
+except ImportError:
+    TRANSFORMERS_AVAILABLE = False
+    AutoTokenizer = None
+    AutoModel = None
 import time
 from datetime import datetime
 import os
@@ -120,6 +135,35 @@ def _get_text_hash(text: str) -> str:
     """Generate hash for text to use as cache key"""
     return hashlib.md5(text.encode()).hexdigest()
 
+def clean_patient_data_for_json(patient_data: Optional[Dict]) -> Optional[Dict]:
+    """Clean patient data for JSON serialization - handle ObjectId, NaN, etc."""
+    if patient_data is None:
+        return None
+    
+    cleaned = {}
+    for key, value in patient_data.items():
+        # Handle ObjectId
+        if isinstance(value, ObjectId):
+            cleaned[key] = str(value)
+        # Handle NaN values
+        elif isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            cleaned[key] = None
+        # Handle nested dictionaries
+        elif isinstance(value, dict):
+            cleaned[key] = clean_patient_data_for_json(value)
+        # Handle lists
+        elif isinstance(value, list):
+            cleaned[key] = [
+                clean_patient_data_for_json(item) if isinstance(item, dict) else 
+                (str(item) if isinstance(item, ObjectId) else 
+                 (None if isinstance(item, float) and (math.isnan(item) or math.isinf(item)) else item))
+                for item in value
+            ]
+        # Handle other types
+        else:
+            cleaned[key] = value
+    return cleaned
+
 # FastAPI client configuration
 FASTAPI_BASE_URL = os.getenv("FASTAPI_URL", "http://localhost:8000")
 
@@ -127,14 +171,16 @@ class FastAPIClient:
     """Client for FastAPI backend"""
     def __init__(self, base_url: str = FASTAPI_BASE_URL):
         self.base_url = base_url
-        self.client = httpx.Client(timeout=60.0)
+        self.client = httpx.Client(timeout=None)  # No timeout - allow long-running LLM requests
     
     def chat(self, message: str, patient_data: Optional[Dict] = None) -> str:
         """Chat with AI agent via FastAPI"""
         try:
+            # Clean patient_data to handle ObjectId and other non-serializable types
+            cleaned_patient_data = clean_patient_data_for_json(patient_data)
             response = self.client.post(
                 f"{self.base_url}/api/chat",
-                json={"message": message, "patient_data": patient_data}
+                json={"message": message, "patient_data": cleaned_patient_data}
             )
             response.raise_for_status()
             return response.json()["response"]
@@ -191,6 +237,19 @@ class FastAPIClient:
             st.error(f"❌ API error: {e.response.text}")
             return None
     
+    def get_all_patients(self) -> List[Dict]:
+        """Get list of all patients via FastAPI"""
+        try:
+            response = self.client.get(f"{self.base_url}/api/patients")
+            response.raise_for_status()
+            return response.json().get("patients", [])
+        except httpx.RequestError as e:
+            st.error(f"❌ Error connecting to API: {str(e)}")
+            return []
+        except httpx.HTTPStatusError as e:
+            st.error(f"❌ API error: {e.response.text}")
+            return []
+    
     def health_check(self) -> bool:
         """Check if FastAPI backend is available"""
         try:
@@ -204,12 +263,19 @@ class FastAPIClient:
         self.client.close()
 
 def _load_tokenizer_model():
-    tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
-    model = AutoModel.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
-    model.eval()
-    if torch.cuda.is_available():
-        model.to("cuda")
-    return tokenizer, model
+    if not TRANSFORMERS_AVAILABLE:
+        st.error("❌ Transformers library not available. Please install it: pip install transformers")
+        return None, None
+    try:
+        tokenizer = AutoTokenizer.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
+        model = AutoModel.from_pretrained("emilyalsentzer/Bio_ClinicalBERT")
+        model.eval()
+        if torch.cuda.is_available():
+            model.to("cuda")
+        return tokenizer, model
+    except Exception as e:
+        st.error(f"❌ Error loading transformers model: {str(e)}")
+        return None, None
 
 def _connect_mongo(uri: str):
     client = MongoClient(uri)
@@ -230,21 +296,21 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Poppins:wght@400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=Poppins:wght@400;500;600;700;800&family=Space+Grotesk:wght@400;500;600;700&display=swap');
     
-    /* Modern Color Palette */
+    /* Ultra Modern Color Palette with Glassmorphism */
     :root {
         --bg-primary: #0a0e27;
         --bg-secondary: #141b2d;
         --bg-tertiary: #1a2332;
-        --bg-card: #1e293b;
-        --bg-card-hover: #243447;
-        --bg-input: #0f172a;
+        --bg-card: rgba(30, 41, 59, 0.7);
+        --bg-card-hover: rgba(36, 52, 71, 0.9);
+        --bg-input: rgba(15, 23, 42, 0.8);
         --text-primary: #f1f5f9;
         --text-secondary: #cbd5e1;
         --text-muted: #94a3b8;
-        --border-color: #334155;
-        --border-light: #475569;
+        --border-color: rgba(51, 65, 85, 0.5);
+        --border-light: rgba(71, 85, 105, 0.6);
         --primary: #6366f1;
         --primary-hover: #4f46e5;
         --primary-light: #818cf8;
@@ -256,96 +322,250 @@ st.markdown("""
         --gradient-primary: linear-gradient(135deg, #6366f1 0%, #8b5cf6 50%, #ec4899 100%);
         --gradient-secondary: linear-gradient(135deg, #0ea5e9 0%, #3b82f6 100%);
         --gradient-success: linear-gradient(135deg, #10b981 0%, #059669 100%);
-        --gradient-card: linear-gradient(135deg, #1e293b 0%, #1a2332 100%);
-        --shadow-sm: 0 2px 4px rgba(0, 0, 0, 0.3);
-        --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.4);
-        --shadow-lg: 0 10px 30px rgba(0, 0, 0, 0.5);
-        --shadow-glow: 0 0 20px rgba(99, 102, 241, 0.3);
+        --gradient-card: linear-gradient(135deg, rgba(30, 41, 59, 0.8) 0%, rgba(26, 35, 50, 0.9) 100%);
+        --gradient-glass: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, rgba(255, 255, 255, 0.05) 100%);
+        --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.4);
+        --shadow-md: 0 8px 24px rgba(0, 0, 0, 0.5);
+        --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
+        --shadow-glow: 0 0 30px rgba(99, 102, 241, 0.4);
+        --shadow-glow-purple: 0 0 30px rgba(168, 85, 247, 0.4);
+        --shadow-glow-cyan: 0 0 30px rgba(6, 182, 212, 0.4);
     }
     
-    /* Global Styles */
+    /* Global Styles with Smooth Animations */
     * {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
     
+    /* Hide scrollbar on main page - only chat container shows scrollbar */
+    html, body {
+        overflow-x: hidden;
+        overflow-y: auto;
+        height: 100%;
+        /* Hide scrollbar but keep scrolling functionality */
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE and Edge */
+    }
+    
+    html::-webkit-scrollbar, body::-webkit-scrollbar {
+        display: none; /* Chrome, Safari, Opera */
+    }
+    
     .stApp {
-        background: var(--bg-primary);
+        background: linear-gradient(135deg, #0a0e27 0%, #141b2d 50%, #0a0e27 100%);
+        background-size: 200% 200%;
+        animation: gradientShift 15s ease infinite;
         color: var(--text-primary);
+        position: relative;
+        overflow-y: auto;
+        overflow-x: hidden;
+        /* Hide scrollbar but keep scrolling functionality */
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE and Edge */
+    }
+    
+    .stApp::-webkit-scrollbar {
+        display: none; /* Chrome, Safari, Opera */
+    }
+    
+    .stApp::before {
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: 
+            radial-gradient(circle at 20% 30%, rgba(99, 102, 241, 0.1) 0%, transparent 50%),
+            radial-gradient(circle at 80% 70%, rgba(168, 85, 247, 0.1) 0%, transparent 50%),
+            radial-gradient(circle at 50% 50%, rgba(6, 182, 212, 0.05) 0%, transparent 50%);
+        pointer-events: none;
+        z-index: 0;
+    }
+    
+    @keyframes gradientShift {
+        0%, 100% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+    }
+    
+    /* Ensure all content is above background - hide scrollbar on main containers */
+    .main {
+        position: relative;
+        z-index: 10 !important;
+        overflow-y: auto;
+        overflow-x: hidden !important;
+        /* Hide scrollbar but keep scrolling functionality */
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE and Edge */
+    }
+    
+    .main::-webkit-scrollbar {
+        display: none; /* Chrome, Safari, Opera */
     }
     
     .main .block-container {
         padding-top: 2rem;
         padding-bottom: 2rem;
+        position: relative;
+        z-index: 10 !important;
+        overflow-y: visible !important;
+        overflow-x: hidden !important;
     }
     
-    /* Header Styles */
+    /* Hide scrollbar on Streamlit app view container */
+    [data-testid="stAppViewContainer"] {
+        overflow-y: auto;
+        overflow-x: hidden !important;
+        /* Hide scrollbar but keep scrolling functionality */
+        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none; /* IE and Edge */
+    }
+    
+    [data-testid="stAppViewContainer"]::-webkit-scrollbar {
+        display: none; /* Chrome, Safari, Opera */
+    }
+    
+    /* Ensure Streamlit elements are visible */
+    [data-testid="stAppViewContainer"],
+    [data-testid="stAppViewContainer"] > div,
+    .element-container,
+    .stMarkdown,
+    div[data-testid="stMarkdownContainer"] {
+        position: relative;
+        z-index: 10 !important;
+    }
+    
+    /* Ensure header is visible */
     .main-header {
-        padding: 3rem 2.5rem;
+        position: relative;
+        z-index: 10 !important;
+    }
+    
+    /* Ultra Modern Header with Animated Gradient */
+    .main-header {
+        padding: 4rem 3rem;
         border: none;
-        border-radius: 24px;
+        border-radius: 32px;
         background: var(--gradient-primary);
         color: white;
         text-align: center;
-        margin-bottom: 2rem;
-        box-shadow: var(--shadow-lg), var(--shadow-glow);
+        margin-bottom: 3rem;
+        box-shadow: var(--shadow-lg), var(--shadow-glow), 0 0 60px rgba(99, 102, 241, 0.3);
         position: relative;
         overflow: hidden;
+        backdrop-filter: blur(20px);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        animation: headerFloat 6s ease-in-out infinite;
+    }
+    
+    @keyframes headerFloat {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-5px); }
     }
     
     .main-header::before {
+        content: '';
+        position: absolute;
+        top: -50%;
+        left: -50%;
+        width: 200%;
+        height: 200%;
+        background: radial-gradient(circle, rgba(255, 255, 255, 0.15) 0%, transparent 70%);
+        animation: rotate 20s linear infinite;
+        pointer-events: none;
+    }
+    
+    @keyframes rotate {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+    
+    .main-header::after {
         content: '';
         position: absolute;
         top: 0;
         left: 0;
         right: 0;
         bottom: 0;
-        background: radial-gradient(circle at 30% 50%, rgba(255, 255, 255, 0.1) 0%, transparent 50%);
+        background: linear-gradient(135deg, rgba(255, 255, 255, 0.1) 0%, transparent 100%);
         pointer-events: none;
     }
     
     .main-header h1 {
         margin: 0;
-        font-size: 2.5rem;
-        font-weight: 800;
-        letter-spacing: -0.03em;
+        font-size: 3rem;
+        font-weight: 900;
+        letter-spacing: -0.04em;
         position: relative;
         z-index: 1;
-        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        text-shadow: 0 4px 20px rgba(0, 0, 0, 0.4), 0 0 40px rgba(255, 255, 255, 0.2);
+        background: linear-gradient(135deg, #ffffff 0%, rgba(255, 255, 255, 0.9) 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        animation: textShine 3s ease-in-out infinite;
+    }
+    
+    @keyframes textShine {
+        0%, 100% { filter: brightness(1); }
+        50% { filter: brightness(1.2); }
     }
     
     .main-header p {
-        margin: 0.75rem 0 0 0;
+        margin: 1rem 0 0 0;
         opacity: 0.95;
-        font-size: 1.1rem;
-        font-weight: 400;
+        font-size: 1.25rem;
+        font-weight: 500;
         position: relative;
         z-index: 1;
+        text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        letter-spacing: 0.02em;
     }
     
-    /* Card Styles */
+    /* Ultra Modern Glassmorphism Cards */
     .patient-card, .metric-card, .chat-container, .summary-card {
-        border: 1px solid var(--border-color);
-        border-radius: 20px;
-        padding: 2rem;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-radius: 24px;
+        padding: 2.5rem;
         background: var(--gradient-card);
+        backdrop-filter: blur(20px) saturate(180%);
+        -webkit-backdrop-filter: blur(20px) saturate(180%);
         color: var(--text-primary);
-        box-shadow: var(--shadow-md);
-        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-        backdrop-filter: blur(10px);
+        box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.1);
+        transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .patient-card::before, .summary-card::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: -100%;
+        width: 100%;
+        height: 100%;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.1), transparent);
+        transition: left 0.5s;
+    }
+    
+    .patient-card:hover::before, .summary-card:hover::before {
+        left: 100%;
     }
     
     .patient-card:hover, .metric-card:hover, .summary-card:hover {
-        box-shadow: var(--shadow-lg), 0 0 30px rgba(99, 102, 241, 0.2);
-        transform: translateY(-4px);
-        border-color: var(--primary);
+        box-shadow: var(--shadow-lg), var(--shadow-glow), 0 0 40px rgba(99, 102, 241, 0.3);
+        transform: translateY(-8px) scale(1.02);
+        border-color: rgba(99, 102, 241, 0.5);
     }
     
     .metric-card {
         text-align: center;
         background: var(--gradient-card);
-        border: 1px solid var(--border-color);
+        backdrop-filter: blur(20px) saturate(180%);
+        border: 1px solid rgba(255, 255, 255, 0.1);
         position: relative;
         overflow: hidden;
+        cursor: pointer;
     }
     
     .metric-card::before {
@@ -354,111 +574,190 @@ st.markdown("""
         top: 0;
         left: 0;
         right: 0;
-        height: 3px;
+        height: 4px;
         background: var(--gradient-primary);
+        box-shadow: 0 0 20px rgba(99, 102, 241, 0.6);
+    }
+    
+    .metric-card::after {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 0;
+        height: 0;
+        border-radius: 50%;
+        background: radial-gradient(circle, rgba(99, 102, 241, 0.2) 0%, transparent 70%);
+        transform: translate(-50%, -50%);
+        transition: width 0.6s, height 0.6s;
+    }
+    
+    .metric-card:hover::after {
+        width: 300px;
+        height: 300px;
     }
     
     .metric-card h4 {
-        margin: 0 0 0.75rem 0;
+        margin: 0 0 1rem 0;
         color: var(--primary-light);
-        font-size: 1.25rem;
-        font-weight: 700;
+        font-size: 1.5rem;
+        font-weight: 800;
         letter-spacing: -0.02em;
+        position: relative;
+        z-index: 1;
+        text-shadow: 0 2px 10px rgba(99, 102, 241, 0.3);
     }
     
     .metric-card p {
         margin: 0.5rem 0;
         color: var(--text-secondary);
-        font-weight: 500;
-        font-size: 0.95rem;
+        font-weight: 600;
+        font-size: 1rem;
+        position: relative;
+        z-index: 1;
     }
     
-    /* Chat Message Styles */
+    /* Ultra Modern Chat Messages with Glassmorphism */
     .chat-message {
-        border: 1px solid var(--border-color);
-        border-left: 4px solid var(--primary);
-        border-radius: 16px;
-        padding: 1.25rem;
-        background: var(--bg-card);
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        border-left: 5px solid var(--primary);
+        border-radius: 20px;
+        padding: 1.5rem;
+        background: rgba(30, 41, 59, 0.6);
+        backdrop-filter: blur(15px) saturate(180%);
         color: var(--text-primary);
-        margin: 1rem 0;
-        box-shadow: var(--shadow-sm);
-        animation: slideInUp 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-        transition: all 0.3s ease;
+        margin: 1.25rem 0;
+        box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+        animation: slideInUp 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        position: relative;
+        overflow: hidden;
+    }
+    
+    .chat-message::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 5px;
+        height: 100%;
+        background: var(--gradient-primary);
+        box-shadow: 0 0 20px rgba(99, 102, 241, 0.6);
     }
     
     .chat-message:hover {
-        box-shadow: var(--shadow-md);
-        transform: translateX(4px);
+        box-shadow: var(--shadow-md), 0 0 30px rgba(99, 102, 241, 0.3);
+        transform: translateX(8px) translateY(-2px);
+        border-color: rgba(99, 102, 241, 0.4);
     }
     
     @keyframes slideInUp {
         from {
             opacity: 0;
-            transform: translateY(20px);
+            transform: translateY(30px) scale(0.95);
         }
         to {
             opacity: 1;
-            transform: translateY(0);
+            transform: translateY(0) scale(1);
         }
     }
     
     .doctor-message {
-        background: linear-gradient(135deg, rgba(99, 102, 241, 0.15) 0%, rgba(139, 92, 246, 0.1) 100%);
+        background: linear-gradient(135deg, rgba(99, 102, 241, 0.2) 0%, rgba(139, 92, 246, 0.15) 100%);
         border-left-color: var(--primary);
-        border: 1px solid rgba(99, 102, 241, 0.3);
+        border: 1px solid rgba(99, 102, 241, 0.4);
+        box-shadow: var(--shadow-sm), 0 0 20px rgba(99, 102, 241, 0.2);
     }
     
     .ai-message {
-        background: linear-gradient(135deg, rgba(168, 85, 247, 0.15) 0%, rgba(236, 72, 153, 0.1) 100%);
+        background: linear-gradient(135deg, rgba(168, 85, 247, 0.2) 0%, rgba(236, 72, 153, 0.15) 100%);
         border-left-color: var(--accent-purple);
-        border: 1px solid rgba(168, 85, 247, 0.3);
+        border: 1px solid rgba(168, 85, 247, 0.4);
+        box-shadow: var(--shadow-sm), 0 0 20px rgba(168, 85, 247, 0.2);
     }
     
-    /* Button Styles */
+    .ai-message::before {
+        background: linear-gradient(135deg, #a855f7 0%, #ec4899 100%);
+        box-shadow: 0 0 20px rgba(168, 85, 247, 0.6);
+    }
+    
+    /* Ultra Modern Button Styles with Glow Effects */
     .stButton > button {
         background: var(--gradient-primary) !important;
         color: white !important;
         border: none !important;
-        border-radius: 12px !important;
-        padding: 0.875rem 1.75rem !important;
-        font-weight: 600 !important;
-        font-size: 0.95rem !important;
-        box-shadow: var(--shadow-md) !important;
-        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        border-radius: 16px !important;
+        padding: 1rem 2rem !important;
+        font-weight: 700 !important;
+        font-size: 1rem !important;
+        box-shadow: var(--shadow-md), var(--shadow-glow) !important;
+        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
         text-transform: none !important;
-        letter-spacing: 0.01em !important;
+        letter-spacing: 0.02em !important;
+        position: relative !important;
+        overflow: hidden !important;
+        backdrop-filter: blur(10px) !important;
+    }
+    
+    .stButton > button::before {
+        content: '';
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 0;
+        height: 0;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.3);
+        transform: translate(-50%, -50%);
+        transition: width 0.6s, height 0.6s;
+    }
+    
+    .stButton > button:hover::before {
+        width: 300px;
+        height: 300px;
     }
     
     .stButton > button:hover {
-        background: var(--primary-hover) !important;
-        box-shadow: var(--shadow-lg), var(--shadow-glow) !important;
-        transform: translateY(-2px) !important;
+        background: var(--gradient-primary) !important;
+        box-shadow: var(--shadow-lg), var(--shadow-glow), 0 0 40px rgba(99, 102, 241, 0.5) !important;
+        transform: translateY(-4px) scale(1.05) !important;
+        border: 1px solid rgba(255, 255, 255, 0.2) !important;
     }
     
     .stButton > button:active {
-        transform: translateY(0) !important;
+        transform: translateY(-2px) scale(1.02) !important;
+        box-shadow: var(--shadow-md), var(--shadow-glow) !important;
     }
     
-    /* Input Styles */
+    .stButton > button span {
+        position: relative;
+        z-index: 1;
+    }
+    
+    /* Ultra Modern Input Styles with Glassmorphism */
     .stTextArea textarea, .stTextInput input {
-        border-radius: 12px !important;
-        border: 2px solid var(--border-color) !important;
-        padding: 0.875rem 1rem !important;
-        background: var(--bg-input) !important;
+        border-radius: 16px !important;
+        border: 2px solid rgba(255, 255, 255, 0.1) !important;
+        padding: 1rem 1.25rem !important;
+        background: rgba(15, 23, 42, 0.6) !important;
+        backdrop-filter: blur(15px) saturate(180%) !important;
         color: var(--text-primary) !important;
-        transition: all 0.3s ease !important;
-        font-size: 0.95rem !important;
+        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        font-size: 1rem !important;
+        box-shadow: var(--shadow-sm), inset 0 1px 0 rgba(255, 255, 255, 0.05) !important;
     }
     
     .stTextArea textarea:focus, .stTextInput input:focus {
         border-color: var(--primary) !important;
-        box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.15) !important;
+        box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.2), var(--shadow-md), 0 0 30px rgba(99, 102, 241, 0.3) !important;
         outline: none !important;
+        background: rgba(15, 23, 42, 0.8) !important;
+        transform: scale(1.01) !important;
     }
     
     .stTextArea textarea::placeholder, .stTextInput input::placeholder {
         color: var(--text-muted) !important;
+        opacity: 0.7 !important;
     }
     
     /* Empty State */
@@ -492,39 +791,102 @@ st.markdown("""
         font-size: 1rem;
     }
     
-    /* Chat Container */
+    /* Ultra Modern Chat Container - No scrolling, flows with main page */
     .chat-container {
-        max-height: 550px;
-        overflow-y: auto;
-        background: var(--bg-secondary);
-        padding: 1.5rem;
-        border-radius: 20px;
-        border: 1px solid var(--border-color);
-    }
-    
-    .chat-container::-webkit-scrollbar {
-        width: 10px;
-    }
-    
-    .chat-container::-webkit-scrollbar-track {
-        background: var(--bg-secondary);
-        border-radius: 5px;
-    }
-    
-    .chat-container::-webkit-scrollbar-thumb {
-        background: var(--border-color);
-        border-radius: 5px;
-        transition: background 0.3s ease;
-    }
-    
-    .chat-container::-webkit-scrollbar-thumb:hover {
-        background: var(--primary);
+        background: rgba(20, 27, 45, 0.6);
+        backdrop-filter: blur(20px) saturate(180%);
+        padding: 2rem;
+        border-radius: 24px;
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        box-shadow: var(--shadow-md), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+        /* No max-height or overflow - content flows naturally with main page */
+        overflow: visible;
     }
     
     /* Summary Card */
     .summary-card {
         background: var(--gradient-card);
         border: 1px solid var(--border-color);
+        margin-top: 1.5rem !important;
+        margin-bottom: 2rem !important;
+    }
+    
+    /* Discharge Summary Section - Professional Spacing */
+    .summary-card .card-header {
+        margin-top: 0 !important;
+        margin-bottom: 1.5rem !important;
+    }
+    
+    /* Text Area Spacing */
+    .stTextArea {
+        margin-top: 1.5rem !important;
+        margin-bottom: 2rem !important;
+    }
+    
+    /* Button Groups - Professional Alignment */
+    .element-container:has(button) {
+        margin-top: 1rem !important;
+        margin-bottom: 1rem !important;
+    }
+    
+    /* Summary Action Buttons - Better Spacing */
+    [data-testid="column"]:has(button[kind="formSubmit"]) {
+        margin-top: 1.5rem !important;
+        margin-bottom: 1.5rem !important;
+    }
+    
+    /* Download Buttons Section - Professional Spacing */
+    .stDownloadButton {
+        margin-top: 1rem !important;
+        margin-bottom: 1rem !important;
+    }
+    
+    /* Divider/HR Spacing */
+    hr {
+        margin-top: 2.5rem !important;
+        margin-bottom: 2.5rem !important;
+        border-color: rgba(255, 255, 255, 0.1) !important;
+        opacity: 0.5 !important;
+    }
+    
+    /* RAG Feedback Section Spacing */
+    .stMarkdown h3 {
+        margin-top: 2rem !important;
+        margin-bottom: 1.5rem !important;
+    }
+    
+    /* Action Buttons Container - Professional Spacing */
+    [data-testid="column"] button {
+        margin-top: 0.5rem !important;
+        margin-bottom: 0.5rem !important;
+    }
+    
+    /* Column spacing for better alignment */
+    [data-testid="column"] {
+        padding-left: 0.75rem !important;
+        padding-right: 0.75rem !important;
+    }
+    
+    /* Text area wrapper spacing */
+    .stTextArea > label {
+        margin-bottom: 0.75rem !important;
+    }
+    
+    /* Summary section overall spacing */
+    [data-testid="column"] .summary-card {
+        margin-top: 1rem !important;
+        margin-bottom: 2rem !important;
+    }
+    
+    /* Better spacing between sections */
+    .main [data-testid="column"] {
+        margin-top: 1rem !important;
+    }
+    
+    /* Spacing for button columns */
+    [data-testid="column"]:has(button) {
+        margin-top: 1rem !important;
+        margin-bottom: 1rem !important;
     }
     
     /* Spinner */
@@ -546,37 +908,103 @@ st.markdown("""
         animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
     }
     
-    /* Card Header */
+    /* Ultra Modern Card Header with Animated Icon */
     .card-header {
         display: flex;
         align-items: center;
-        gap: 1rem;
-        margin-bottom: 1.5rem;
-        padding-bottom: 1rem;
-        border-bottom: 2px solid var(--border-color);
+        gap: 1.5rem;
+        margin-top: 2.5rem !important;
+        margin-bottom: 2rem !important;
+        padding-bottom: 1.5rem;
+        border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+        position: relative;
+    }
+    
+    /* First section header - less top margin */
+    .main .element-container:first-of-type .card-header,
+    .main [data-testid="column"]:first-of-type .card-header {
+        margin-top: 1rem !important;
+    }
+    
+    /* Section headers spacing - add more vertical space */
+    .main [data-testid="column"] .card-header {
+        margin-top: 2.5rem !important;
+        margin-bottom: 2.5rem !important;
+    }
+    
+    .card-header::after {
+        content: '';
+        position: absolute;
+        bottom: -2px;
+        left: 0;
+        width: 100px;
+        height: 2px;
+        background: var(--gradient-primary);
+        box-shadow: 0 0 20px rgba(99, 102, 241, 0.6);
+        animation: slideRight 3s ease-in-out infinite;
+    }
+    
+    @keyframes slideRight {
+        0%, 100% { left: 0; }
+        50% { left: calc(100% - 100px); }
     }
     
     .card-header-icon {
-        width: 48px;
-        height: 48px;
-        border-radius: 12px;
+        width: 56px;
+        height: 56px;
+        border-radius: 16px;
         display: flex;
         align-items: center;
         justify-content: center;
-        font-size: 1.5rem;
+        font-size: 1.75rem;
         background: var(--gradient-primary);
         color: white;
-        box-shadow: var(--shadow-md);
+        box-shadow: var(--shadow-md), var(--shadow-glow);
+        position: relative;
+        overflow: hidden;
+        transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
     }
     
-    /* Sidebar Styles */
+    .card-header-icon::before {
+        content: '';
+        position: absolute;
+        top: -50%;
+        left: -50%;
+        width: 200%;
+        height: 200%;
+        background: radial-gradient(circle, rgba(255, 255, 255, 0.3) 0%, transparent 70%);
+        animation: iconRotate 3s linear infinite;
+    }
+    
+    @keyframes iconRotate {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+    }
+    
+    .card-header-icon:hover {
+        transform: scale(1.1) rotate(5deg);
+        box-shadow: var(--shadow-lg), var(--shadow-glow), 0 0 40px rgba(99, 102, 241, 0.5);
+    }
+    
+    /* Ultra Modern Sidebar with Glassmorphism */
     [data-testid="stSidebar"] {
-        background: var(--bg-secondary);
-        border-right: 1px solid var(--border-color);
+        background: rgba(20, 27, 45, 0.8) !important;
+        backdrop-filter: blur(20px) saturate(180%) !important;
+        border-right: 1px solid rgba(255, 255, 255, 0.1) !important;
+        box-shadow: 4px 0 24px rgba(0, 0, 0, 0.3) !important;
     }
     
     [data-testid="stSidebar"] .css-1d391kg {
-        background: var(--bg-secondary);
+        background: transparent !important;
+    }
+    
+    [data-testid="stSidebar"] .stMarkdown h1,
+    [data-testid="stSidebar"] .stMarkdown h2,
+    [data-testid="stSidebar"] .stMarkdown h3 {
+        background: var(--gradient-primary) !important;
+        -webkit-background-clip: text !important;
+        -webkit-text-fill-color: transparent !important;
+        background-clip: text !important;
     }
     
     /* Progress Bar */
@@ -668,7 +1096,265 @@ st.markdown("""
         padding: 1rem !important;
         background: var(--bg-card) !important;
     }
+    
+    /* Streamlit Header Bar */
+    [data-testid="stHeader"] {
+        background: var(--bg-secondary) !important;
+        border-bottom: 1px solid var(--border-color) !important;
+    }
+    
+    [data-testid="stHeader"] > div {
+        background: var(--bg-secondary) !important;
+    }
+    
+    /* Form Submit Buttons */
+    .stForm button[type="submit"],
+    .stForm button[kind="formSubmit"],
+    form button[type="submit"] {
+        background: var(--gradient-primary) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 0.875rem 1.75rem !important;
+        font-weight: 600 !important;
+        font-size: 0.95rem !important;
+        box-shadow: var(--shadow-md) !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        width: 100% !important;
+    }
+    
+    .stForm button[type="submit"]:hover,
+    .stForm button[kind="formSubmit"]:hover,
+    form button[type="submit"]:hover {
+        background: var(--primary-hover) !important;
+        box-shadow: var(--shadow-lg), var(--shadow-glow) !important;
+        transform: translateY(-2px) !important;
+    }
+    
+    /* All buttons - ensure they have the theme by default */
+    button[kind="secondary"],
+    button[kind="primary"],
+    .stButton > button,
+    button {
+        background: var(--gradient-primary) !important;
+        color: white !important;
+        border: none !important;
+        border-radius: 12px !important;
+        padding: 0.875rem 1.75rem !important;
+        font-weight: 600 !important;
+        font-size: 0.95rem !important;
+        box-shadow: var(--shadow-md) !important;
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    }
+    
+    button[kind="secondary"]:hover,
+    button[kind="primary"]:hover,
+    .stButton > button:hover,
+    button:hover {
+        background: var(--primary-hover) !important;
+        box-shadow: var(--shadow-lg), var(--shadow-glow) !important;
+        transform: translateY(-2px) !important;
+    }
+    
+    button[kind="secondary"]:active,
+    button[kind="primary"]:active,
+    .stButton > button:active,
+    button:active {
+        transform: translateY(0) !important;
+    }
+    
+    /* Modal Styles */
+    .modal-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        background: rgba(0, 0, 0, 0.7);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+        backdrop-filter: blur(5px);
+    }
+    
+    .modal-content {
+        background: var(--bg-card);
+        border: 1px solid var(--border-color);
+        border-radius: 24px;
+        padding: 2rem;
+        max-width: 800px;
+        /* Removed max-height and overflow-y to prevent nested scrolling */
+        box-shadow: var(--shadow-lg);
+        color: var(--text-primary);
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+    
+    .modal-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 1.5rem;
+        padding-bottom: 1rem;
+        border-bottom: 2px solid var(--border-color);
+    }
+    
+    .modal-header h2 {
+        margin: 0;
+        color: var(--text-primary);
+        font-size: 1.75rem;
+        font-weight: 700;
+    }
+    
+    .modal-close {
+        background: var(--danger);
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 0.5rem 1rem;
+        cursor: pointer;
+        font-weight: 600;
+        transition: all 0.3s ease;
+    }
+    
+    .modal-close:hover {
+        background: #dc2626;
+        transform: scale(1.05);
+    }
+    
+    .modal-section {
+        margin: 1.5rem 0;
+        padding: 1rem;
+        background: var(--bg-secondary);
+        border-radius: 12px;
+        border-left: 4px solid var(--primary);
+    }
+    
+    .modal-section h3 {
+        margin: 0 0 0.75rem 0;
+        color: var(--primary-light);
+        font-size: 1.1rem;
+        font-weight: 600;
+    }
+    
+    .modal-section p {
+        margin: 0.5rem 0;
+        color: var(--text-secondary);
+        line-height: 1.6;
+    }
+    
+    .modal-section strong {
+        color: var(--text-primary);
+        font-weight: 600;
+    }
+    
+    /* Fix Streamlit Footer - Completely Remove from Layout */
+    footer[data-testid="stFooter"],
+    footer,
+    .stFooter,
+    [data-testid="stFooter"],
+    div[data-testid="stFooter"],
+    .stApp footer,
+    footer.stFooter {
+        display: none !important;
+        visibility: hidden !important;
+        height: 0 !important;
+        min-height: 0 !important;
+        max-height: 0 !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        border: none !important;
+        position: absolute !important;
+        top: -9999px !important;
+        left: -9999px !important;
+        width: 0 !important;
+        overflow: hidden !important;
+        z-index: -9999 !important;
+        opacity: 0 !important;
+    }
+    
+    /* Remove footer from document flow completely */
+    .stApp > footer,
+    [data-testid="stAppViewContainer"] > footer,
+    body > footer {
+        display: none !important;
+        height: 0 !important;
+        margin: 0 !important;
+        padding: 0 !important;
+    }
+    
+    /* Ensure content has proper bottom padding so nothing is hidden */
+    .main .block-container {
+        padding-bottom: 6rem !important;
+        margin-bottom: 4rem !important;
+    }
+    
+    /* Fix any fixed position elements that might be blocking content */
+    [data-testid="stAppViewContainer"] {
+        padding-bottom: 4rem !important;
+        margin-bottom: 2rem !important;
+    }
+    
+    /* Ensure main content area has enough space */
+    .main {
+        padding-bottom: 4rem !important;
+        margin-bottom: 2rem !important;
+    }
+    
+    /* Remove any fixed/sticky footer elements */
+    *[style*="position: fixed"][style*="bottom"],
+    *[style*="position:fixed"][style*="bottom"] {
+        bottom: -9999px !important;
+    }
+    
+    /* Ensure body and html don't have footer space */
+    body, html {
+        padding-bottom: 0 !important;
+        margin-bottom: 0 !important;
+    }
 </style>
+<script>
+    // Aggressively remove footer on page load and continuously
+    function removeFooter() {
+        const footers = document.querySelectorAll('footer, [data-testid="stFooter"], .stFooter, footer[data-testid="stFooter"]');
+        footers.forEach(footer => {
+            footer.style.display = 'none';
+            footer.style.visibility = 'hidden';
+            footer.style.height = '0';
+            footer.style.padding = '0';
+            footer.style.margin = '0';
+            footer.style.position = 'absolute';
+            footer.style.top = '-9999px';
+            footer.style.opacity = '0';
+            footer.remove(); // Actually remove from DOM
+        });
+    }
+    
+    // Run immediately
+    removeFooter();
+    
+    // Run on DOMContentLoaded
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', removeFooter);
+    } else {
+        removeFooter();
+    }
+    
+    // Run after a short delay to catch dynamically added footers
+    setTimeout(removeFooter, 100);
+    setTimeout(removeFooter, 500);
+    setTimeout(removeFooter, 1000);
+    
+    // Use MutationObserver to catch any footer that gets added later
+    const observer = new MutationObserver(function(mutations) {
+        removeFooter();
+    });
+    
+    observer.observe(document.body, {
+        childList: true,
+        subtree: true
+    });
+</script>
 """, unsafe_allow_html=True)
 
 # Initialize session state
@@ -680,12 +1366,19 @@ if 'discharge_summary' not in st.session_state:
     st.session_state.discharge_summary = None
 if 'autogen_agent' not in st.session_state:
     st.session_state.autogen_agent = None
+if 'show_patient_overview' not in st.session_state:
+    st.session_state.show_patient_overview = False
+if 'selected_similar_patient' not in st.session_state:
+    st.session_state.selected_similar_patient = None
 
 class MedicalRAGSystem:
     def __init__(self):
         self.mongo_uri = "mongodb+srv://ishaanroopesh0102:6eShFuC0pNnFFNGm@cluster0.biujjg4.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
         self.chroma_path = "vector_db/chroma"
-        self.ollama_model = "llama3"
+        # Groq API Configuration
+        self.groq_api_key = os.getenv("GROQ_API_KEY", "")
+        self.groq_base_url = "https://api.groq.com/openai/v1"
+        self.groq_model = "meta-llama/llama-4-maverick-17b-128e-instruct"
         self.num_results = 3
         self.http = _http_session()
         self.embedding_cache = _embedding_cache
@@ -748,49 +1441,52 @@ Rules:
 - Use concise, professional medical language.
 - Base content solely on the input patient data.
 - Preserve patient identifiers verbatim if present.
-- Be brief and factual."""
+- Be brief and factual.
+- IMPORTANT: Do NOT use markdown formatting (no asterisks, no bold, no headers). Return plain text only."""
 
         user_prompt = f"""Generate a discharge summary STRICTLY following the section list above, based only on this data:\n\n{patient_data}\n\nReturn plain text with the exact section headings in order."""
 
+        if not self.groq_api_key:
+            return "❌ GROQ_API_KEY environment variable is not set. Please set it in your .env file."
+
         try:
             response = self.http.post(
-                "http://localhost:11434/api/chat",
+                f"{self.groq_base_url}/chat/completions",
                 json={
-                    "model": self.ollama_model,
+                    "model": self.groq_model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "stream": True,
-                    "options": {
-                        "temperature": 0.3,  # Lower temperature for faster, more deterministic responses
+                    "temperature": 0.3,
                         "top_p": 0.85,
-                        "max_tokens": 500,  # Reduced from 700 for faster generation
-                        "num_predict": 500
-                    }
+                    "max_tokens": 4000
                 },
-                timeout=30  # Add timeout
+                headers={
+                    "Authorization": f"Bearer {self.groq_api_key}",
+                    "Content-Type": "application/json"
+                },
+                timeout=120.0
             )
             if response.ok:
-                full_response = ""
-                for line in response.iter_lines(decode_unicode=True):
-                    if not line:
-                        continue
-                    try:
-                        json_data = json.loads(line)
-                        if 'message' in json_data and 'content' in json_data['message']:
-                            content = json_data['message']['content']
-                            if content:
-                                full_response += content
-                        if json_data.get('done', False):
-                            break
-                    except json.JSONDecodeError:
-                        continue
-                return full_response.strip() if full_response.strip() else "Summary generated successfully."
+                data = response.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    content = data["choices"][0].get("message", {}).get("content", "")
+                    return content.strip() if content.strip() else "Summary generated successfully."
+                else:
+                    return "❌ Error: Invalid response format from Groq API"
             else:
-                return f"❌ Error generating summary: {response.text}"
+                error_msg = response.text
+                if response.status_code == 401:
+                    return "❌ Error: Invalid Groq API key. Please check your GROQ_API_KEY."
+                elif response.status_code == 429:
+                    return "❌ Error: Groq API rate limit exceeded. Please wait 30-60 seconds before trying again. Consider upgrading your Groq API plan for higher rate limits."
+                else:
+                    return f"❌ Error generating summary (HTTP {response.status_code}): {error_msg}"
+        except requests.exceptions.Timeout:
+            return "❌ Error: Request to Groq API timed out. Please try again."
         except Exception as e:
-            return f"❌ Error connecting to Ollama: {str(e)}"
+            return f"❌ Error connecting to Groq API: {str(e)}"
 
     def generate_pdf_from_text(self, text: str, template_bytes: bytes | None = None) -> bytes:
         """Generate a PDF from plain text. If a PDF template is provided, overlay text pages on template pages.
@@ -928,7 +1624,7 @@ Rules:
         return embedding
     
     def format_patient_fields(self, record: Dict) -> str:
-        """Format patient record fields for embedding"""
+        """Format patient record fields for embedding and AI context"""
         fields = [
             "name", "unit no", "admission date", "date of birth", "sex", "service",
             "allergies", "attending", "chief complaint", "major surgical or invasive procedure",
@@ -938,7 +1634,16 @@ Rules:
             "discharge condition", "discharge instructions", "follow-up", "discharge disposition"
         ]
         parts = [f"{field.title()}: {record.get(field, '')}" for field in fields if record.get(field)]
-        return " ".join(parts)
+        
+        # If this is a preprocessed patient with full document, include it for complete context
+        if record.get('_full_document'):
+            parts.append(f"\n\nFULL PATIENT DOCUMENT:\n{record.get('_full_document')}")
+        
+        # If discharge summary is available, include it
+        if record.get('_discharge_summary'):
+            parts.append(f"\n\nDISCHARGE SUMMARY:\n{record.get('_discharge_summary')}")
+        
+        return " ".join(parts) if parts else "No patient information available"
     
     def get_patient_by_unit_no(self, unit_no: str) -> Optional[Dict]:
         """Retrieve patient record from MongoDB"""
@@ -949,38 +1654,102 @@ Rules:
             st.error(f"Error retrieving patient: {str(e)}")
             return None
     
-    def search_similar_cases(self, query_text: str, n_results: int = 3) -> List[Dict]:
-        """Search for similar cases using RAG"""
+    def get_all_patients_list(self) -> List[Dict]:
+        """Get list of all patients with name and unit number"""
         try:
+            # Query MongoDB for all patients, only get name and unit no
+            patients = list(self.patients_collection.find(
+                {},
+                {"name": 1, "unit no": 1, "_id": 0}  # Only return name and unit no
+            ))
+            
+            # Format patient data
+            patient_list = []
+            for patient in patients:
+                name = patient.get("name", "Unknown")
+                unit_no = patient.get("unit no", "N/A")
+                if name and name != "Unknown" and unit_no and unit_no != "N/A":
+                    patient_list.append({
+                        "name": str(name),
+                        "unit_no": str(unit_no),
+                        "display": f"{name} (Unit {unit_no})"
+                    })
+            
+            # Sort by name
+            patient_list.sort(key=lambda x: x["name"])
+            return patient_list
+        except Exception as e:
+            st.error(f"Error retrieving patients list: {str(e)}")
+            return []
+    
+    def search_similar_cases(self, query_text: str, n_results: int = 3) -> List[Dict]:
+        """Search for similar cases using RAG - excludes MongoDB patients"""
+        try:
+            # Get list of MongoDB patient unit numbers to exclude
+            mongo_unit_nos = set()
+            try:
+                mongo_patients = list(self.patients_collection.find({}, {"unit no": 1, "_id": 0}))
+                mongo_unit_nos = {str(patient.get("unit no", "")) for patient in mongo_patients if patient.get("unit no")}
+            except Exception as e:
+                st.warning(f"Could not fetch MongoDB patients for filtering: {str(e)}")
+            
+            # Search with more results to account for filtering
             query_embedding = self.embed_text(query_text)
             results = self.chroma_collection.query(
                 query_embeddings=[query_embedding],
-                n_results=n_results,
-                include=["documents", "metadatas"]
+                n_results=n_results * 3,  # Get more results to filter
+                include=["documents", "metadatas", "distances"]
             )
             
             similar_cases = []
             for i in range(len(results["documents"][0])):
+                metadata = results["metadatas"][0][i] if i < len(results["metadatas"][0]) else {}
+                unit_no = str(metadata.get('unit_no') or metadata.get('unit no', ''))
+                
+                # Skip if this patient exists in MongoDB (only show ChromaDB/preprocessed patients)
+                if unit_no and unit_no in mongo_unit_nos:
+                    continue
+                
                 similar_cases.append({
                     "document": results["documents"][0][i],
-                    "metadata": results["metadatas"][0][i],
-                    "similarity": 1 - results["distances"][0][i]  # Convert distance to similarity
+                    "metadata": metadata,
+                    "similarity": 1 - results["distances"][0][i] if i < len(results["distances"][0]) else 0.0
                 })
+                
+                # Stop when we have enough results
+                if len(similar_cases) >= n_results:
+                    break
             
             return similar_cases
         except Exception as e:
             st.error(f"Error searching similar cases: {str(e)}")
             return []
     
+    def _clean_markdown_formatting(self, text: str) -> str:
+        """Remove markdown formatting like asterisks, bold markers, etc."""
+        import re
+        # Remove bold/italic markers (**text**, *text*)
+        text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Remove **bold**
+        text = re.sub(r'\*([^*]+)\*', r'\1', text)  # Remove *italic*
+        # Remove standalone asterisks used as bullets
+        text = re.sub(r'^\s*\*\s+', '', text, flags=re.MULTILINE)
+        # Remove markdown headers (# Header)
+        text = re.sub(r'^#+\s+', '', text, flags=re.MULTILINE)
+        return text
+    
     def generate_discharge_summary(self, patient_data: str, similar_cases: List[Dict] = None) -> str:
-        """Generate discharge summary using Ollama LLM"""
+        """Generate discharge summary using Groq API"""
+        if not self.groq_api_key:
+            return "❌ GROQ_API_KEY environment variable is not set. Please set it in your .env file."
+        
         system_prompt = """You are an expert medical AI assistant that generates structured, clinically accurate discharge summaries.
 Base your summary entirely on the INPUT PATIENT DATA provided.
 The discharge summary MUST include: Name, Unit No, Date Of Birth, Sex, Admission/Discharge Dates, Attending, Chief Complaint, Procedure, History, Physical Exam (on Admission), Pertinent Results, Brief Hospital Course, Medications on Admission, Discharge Medications, Discharge Instructions, Discharge Disposition, Discharge Diagnosis, Discharge Condition, Follow-up.
 
 For Name, Unit No, Date of Birth, and Sex, copy the information verbatim.
 If information is missing, state "[Information not available]".
-Use concise, professional medical language. Be brief and factual."""
+Use concise, professional medical language. Be brief and factual.
+IMPORTANT: Do NOT use markdown formatting (no asterisks, no bold, no headers). Return plain text only."""
 
         user_prompt = f"""Generate a discharge summary for this patient:
 {patient_data}
@@ -989,44 +1758,43 @@ Extract Name, Unit No, Date of Birth, and Sex exactly as provided."""
 
         try:
             response = self.http.post(
-                "http://localhost:11434/api/chat",
+                f"{self.groq_base_url}/chat/completions",
                 json={
-                    "model": self.ollama_model,
+                    "model": self.groq_model,
                     "messages": [
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_prompt}
                     ],
-                    "stream": True,
-                    "options": {
-                        "temperature": 0.3,  # Lower temperature for faster responses
+                    "temperature": 0.3,
                         "top_p": 0.85,
-                        "max_tokens": 500,  # Reduced for faster generation
-                        "num_predict": 500
-                    }
+                    "max_tokens": 4000
                 },
-                timeout=30  # Add timeout
+                headers={
+                    "Authorization": f"Bearer {self.groq_api_key}",
+                    "Content-Type": "application/json"
+                },
+                timeout=120.0  # 2 minute timeout
             )
 
             if response.ok:
-                full_response = ""
-                for line in response.iter_lines(decode_unicode=True):
-                    if not line:
-                        continue
-                    try:
-                        json_data = json.loads(line)
-                        if 'message' in json_data and 'content' in json_data['message']:
-                            content = json_data['message']['content']
-                            if content:
-                                full_response += content
-                        if json_data.get('done', False):
-                            break
-                    except json.JSONDecodeError:
-                        continue
-                return full_response.strip() if full_response.strip() else "Summary generated successfully."
+                data = response.json()
+                if "choices" in data and len(data["choices"]) > 0:
+                    content = data["choices"][0].get("message", {}).get("content", "")
+                    return content.strip() if content.strip() else "Summary generated successfully."
+                else:
+                    return "❌ Error: Invalid response format from Groq API"
             else:
-                return f"❌ Error generating summary: {response.text}"
+                error_msg = response.text
+                if response.status_code == 401:
+                    return "❌ Error: Invalid Groq API key. Please check your GROQ_API_KEY."
+                elif response.status_code == 429:
+                    return "❌ Error: Groq API rate limit exceeded. Please wait 30-60 seconds before trying again. Consider upgrading your Groq API plan for higher rate limits."
+                else:
+                    return f"❌ Error generating summary (HTTP {response.status_code}): {error_msg}"
+        except requests.exceptions.Timeout:
+            return "❌ Error: Request to Groq API timed out. Please try again."
         except Exception as e:
-            return f"❌ Error connecting to Ollama: {str(e)}"
+            return f"❌ Error connecting to Groq API: {str(e)}"
 
     # --- START: NEW FEEDBACK LOOP METHOD ---
     def add_summary_to_vector_db(self, patient_info: Dict, summary_text: str):
@@ -1106,7 +1874,10 @@ class AutoGenMedicalAgent:
             return f"❌ Error in conversation: {str(e)}"
     
     def _fallback_chat(self, message: str, patient_data: Dict = None) -> str:
-        """Fallback chat using direct Ollama interaction - optimized for speed"""
+        """Fallback chat using direct Groq API interaction - optimized for speed"""
+        if not self.rag_system.groq_api_key:
+            return "❌ GROQ_API_KEY environment variable is not set. Please set it in your .env file."
+        
         try:
             # Check if user is asking for discharge summary generation
             if "discharge summary" in message.lower() or "generate summary" in message.lower():
@@ -1117,52 +1888,102 @@ class AutoGenMedicalAgent:
                 else:
                     return "❌ Please select a patient first to generate a discharge summary."
             
-            # Add patient context if available (truncated for speed)
-            context = ""
+            # Add patient context with actual patient data if available
+            patient_context = ""
             if patient_data:
+                # Format patient data for context
                 patient_text = self.rag_system.format_patient_fields(patient_data)
-                # Truncate context to avoid long prompts
-                context = f"\n\nPatient: {patient_data.get('name', 'Unknown')} (Unit {patient_data.get('unit no', 'N/A')})"
+                patient_name = patient_data.get('name', 'Unknown')
+                unit_no = patient_data.get('unit no', 'N/A')
+                patient_context = f"""
+
+CURRENT PATIENT INFORMATION:
+{patient_text}
+
+Note: The person you are talking to is a medical professional (doctor or nurse) asking questions about this patient. Answer their questions based on the patient information provided above."""
             
-            system_prompt = """You are a medical AI assistant. Provide concise, accurate responses. Keep answers brief (2-3 sentences max)."""
+            system_prompt = """You are a medical AI assistant designed to help doctors and nurses with clinical documentation and medical questions. 
+The person you are talking to is a medical professional (doctor or nurse), NOT a patient. 
+When patient information is provided, use it to answer questions about that specific patient.
+IMPORTANT: Only use the patient information provided in the CURRENT PATIENT INFORMATION section below. Do not reference any previous patients or conversations.
+Provide accurate, helpful responses based on the patient data. Be concise but thorough."""
             
-            # Optimize request for faster response
-            response = self.rag_system.http.post(
-                "http://localhost:11434/api/chat",
-                json={
-                    "model": "llama3",
-                    "messages": [
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": f"{message}{context}"}
-                    ],
-                    "stream": True,
-                    "options": {
-                        "temperature": 0.4,  # Lower temperature for faster, more deterministic responses
-                        "top_p": 0.85,
-                        "max_tokens": 150,  # Reduced from 250 for faster responses
-                        "num_predict": 150
-                    }
-                },
-                timeout=20  # Add timeout for faster failure
-            )
-            
-            if response.ok:
-                full_response = ""
-                for line in response.iter_lines(decode_unicode=True):
-                    if line:
-                        try:
-                            json_data = json.loads(line)
-                            if 'message' in json_data and 'content' in json_data['message']:
-                                content = json_data['message']['content']
-                                if content:
-                                    full_response += content
-                            if json_data.get('done', False):
-                                break
-                        except json.JSONDecodeError:
-                            continue
-                return full_response.strip() if full_response.strip() else "I'm here to help with medical questions. How can I assist you?"
+            user_message = message
+            if patient_context:
+                # Add explicit instruction to use only the current patient
+                user_message = f"{message}\n\n{patient_context}\n\nRemember: Only answer questions about the patient information provided above. Do not reference any other patients."
             else:
-                return f"❌ Error connecting to Ollama: {response.text}"
+                # If no patient data, remind that patient needs to be selected
+                user_message = f"{message}\n\nNote: No patient is currently selected. Please select a patient first to get patient-specific information."
+            
+            # Optimize request for faster response using Groq API with retry logic
+            import time
+            max_retries = 3
+            last_error = None
+            
+            for attempt in range(max_retries):
+                try:
+                    response = self.rag_system.http.post(
+                        f"{self.rag_system.groq_base_url}/chat/completions",
+                        json={
+                            "model": self.rag_system.groq_model,
+                            "messages": [
+                                {"role": "system", "content": system_prompt},
+                                {"role": "user", "content": user_message}
+                            ],
+                            "temperature": 0.4,
+                            "top_p": 0.85,
+                            "max_tokens": 500  # Increased to allow proper responses
+                        },
+                        headers={
+                            "Authorization": f"Bearer {self.rag_system.groq_api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        timeout=30.0
+                    )
+                    
+                    if response.ok:
+                        data = response.json()
+                        if "choices" in data and len(data["choices"]) > 0:
+                            content = data["choices"][0].get("message", {}).get("content", "")
+                            return content.strip() if content.strip() else "I'm here to help with medical questions. How can I assist you?"
+                        else:
+                            return "❌ Error: Invalid response format from Groq API"
+                    else:
+                        error_msg = response.text
+                        if response.status_code == 401:
+                            return "❌ Error: Invalid Groq API key. Please check your GROQ_API_KEY."
+                        elif response.status_code == 429:
+                            # Rate limit - wait and retry with exponential backoff
+                            if attempt < max_retries - 1:
+                                wait_time = min(2 ** (attempt + 2), 30)  # 4s, 8s, 16s (max 30s)
+                                time.sleep(wait_time)
+                                continue
+                            return "❌ Error: Groq API rate limit exceeded. Please wait 30-60 seconds before trying again. Consider upgrading your Groq API plan for higher rate limits."
+                        else:
+                            # For other errors, retry once
+                            if attempt < max_retries - 1 and response.status_code >= 500:
+                                time.sleep(2 ** attempt)
+                                continue
+                            return f"❌ Error connecting to Groq API (HTTP {response.status_code}): {error_msg}"
+                except requests.exceptions.Timeout:
+                    if attempt < max_retries - 1:
+                        time.sleep(2 ** attempt)
+                        continue
+                    return "⏱️ Request timed out. Please try again."
+                except Exception as e:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        time.sleep(1)
+                        continue
+            
+            # If all retries failed
+            if last_error:
+                error_str = str(last_error)
+                if "429" in error_str or "rate limit" in error_str.lower():
+                    return "❌ Error: Groq API rate limit exceeded. Please wait 30-60 seconds before trying again."
+                return f"❌ Error: {error_str}"
+            return "❌ Error: Failed to connect to Groq API after multiple attempts."
                 
         except requests.exceptions.Timeout:
             return "⏱️ Request timed out. Please try again with a shorter message."
@@ -1252,7 +2073,9 @@ def main():
         elif "template_pdf_bytes" not in st.session_state:
             st.info("No template uploaded. Summaries will be generated as plain text or basic PDF.")
 
-    st.markdown(_get_css(st.session_state.get('minimal_ui', False)), unsafe_allow_html=True)
+    # Only load minimal CSS if minimal_ui is enabled, otherwise the modern CSS is already loaded at the top
+    if st.session_state.get('minimal_ui', False):
+        st.markdown(_get_css(True), unsafe_allow_html=True)
 
     # Header with modern dark design
     st.markdown("""
@@ -1304,7 +2127,77 @@ def main():
     with st.sidebar:
         st.header("🔍 Patient Search")
         
-        # Patient search form
+        # Get all patients for dropdown
+        @st.cache_data(ttl=300)  # Cache for 5 minutes
+        def load_patients_list():
+            """Load list of all patients"""
+            try:
+                if st.session_state.get('use_fastapi', False):
+                    return st.session_state.api_client.get_all_patients()
+                else:
+                    return st.session_state.rag_system.get_all_patients_list()
+            except Exception as e:
+                st.error(f"Error loading patients: {str(e)}")
+                return []
+        
+        patients_list = load_patients_list()
+        
+        # Create dropdown options
+        if patients_list:
+            patient_options = ["-- Select a patient --"] + [p["display"] for p in patients_list]
+            patient_dict = {p["display"]: p for p in patients_list}
+        else:
+            patient_options = ["-- No patients available --"]
+            patient_dict = {}
+        
+        # Patient dropdown selection
+        selected_patient_display = st.selectbox(
+            "Select Patient",
+            options=patient_options,
+            index=0,
+            key="patient_dropdown"
+        )
+        
+        # Track previous patient to detect changes
+        if "previous_patient_unit_no" not in st.session_state:
+            st.session_state.previous_patient_unit_no = None
+        
+        # Handle patient selection from dropdown
+        if selected_patient_display and selected_patient_display != "-- Select a patient --" and selected_patient_display != "-- No patients available --":
+            selected_patient_info = patient_dict.get(selected_patient_display)
+            if selected_patient_info:
+                selected_unit_no = selected_patient_info["unit_no"]
+                
+                # Check if patient changed
+                if st.session_state.previous_patient_unit_no != selected_unit_no:
+                    with st.spinner("Loading patient..."):
+                        try:
+                            # Use FastAPI if available
+                            if st.session_state.get('use_fastapi', False):
+                                patient = st.session_state.api_client.get_patient(selected_unit_no)
+                            else:
+                                patient = st.session_state.rag_system.get_patient_by_unit_no(selected_unit_no)
+                            
+                            if patient:
+                                # Clear chat history and discharge summary when switching patients
+                                st.session_state.chat_history = []
+                                st.session_state.discharge_summary = None
+                                if "editable_summary" in st.session_state:
+                                    st.session_state.editable_summary = None
+                                
+                                # Set new patient
+                                st.session_state.current_patient = patient
+                                st.session_state.previous_patient_unit_no = selected_unit_no
+                                
+                                st.success(f"✅ Loaded: {patient.get('name', 'Unknown')}")
+                                st.rerun()  # Rerun to refresh UI
+                        except Exception as e:
+                            st.error(f"❌ Error loading patient: {str(e)}")
+        
+        st.markdown("---")
+        st.markdown("**Or search by Unit Number:**")
+        
+        # Patient search form (keep existing functionality)
         with st.form("patient_search"):
             unit_no = st.text_input("Unit Number", placeholder="Enter patient unit number")
             search_button = st.form_submit_button("🔍 Search Patient")
@@ -1318,12 +2211,22 @@ def main():
                         else:
                             patient = st.session_state.rag_system.get_patient_by_unit_no(unit_no)
                         if patient:
+                            # Clear chat history, discharge summary, and similar cases when switching patients
+                            if st.session_state.previous_patient_unit_no != str(patient.get('unit no', '')):
+                                st.session_state.chat_history = []
+                                st.session_state.discharge_summary = None
+                                if "editable_summary" in st.session_state:
+                                    st.session_state.editable_summary = None
+                            
                             st.session_state.current_patient = patient
+                            st.session_state.previous_patient_unit_no = str(patient.get('unit no', ''))
+                            
                             st.markdown(f"""
                             <div style="background: rgba(16, 185, 129, 0.15); border: 1px solid rgba(16, 185, 129, 0.4); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
                                 <p style="color: var(--success); margin: 0; font-weight: 600;">✅ Found patient: {patient.get('name', 'Unknown')}</p>
                             </div>
                             """, unsafe_allow_html=True)
+                            st.rerun()  # Rerun to refresh UI
                         else:
                             st.markdown("""
                             <div style="background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.4); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
@@ -1337,7 +2240,7 @@ def main():
                         </div>
                         """, unsafe_allow_html=True)
         
-        # Display current patient info
+        # Display current patient info - ensure it updates when patient changes
         if st.session_state.current_patient:
             st.markdown("### 👤 Current Patient")
             patient = st.session_state.current_patient
@@ -1358,7 +2261,7 @@ def main():
     
     with col1:
         st.markdown("""
-        <div class="card-header">
+        <div class="card-header" style="margin-top: 1rem; margin-bottom: 2.5rem;">
             <div class="card-header-icon">💬</div>
             <h3 style="margin: 0; color: var(--text-dark);">AI Medical Assistant</h3>
         </div>
@@ -1477,102 +2380,82 @@ def main():
                     st.rerun()
             
             # Action buttons with modern styling
+            st.markdown("<div style='margin-top: 3rem; margin-bottom: 1.5rem;'></div>", unsafe_allow_html=True)
             st.markdown("---")
             st.markdown("""
-            <div class="card-header">
+            <div class="card-header" style="margin-top: 2rem; margin-bottom: 2rem;">
                 <div class="card-header-icon">🚀</div>
                 <h3 style="margin: 0; color: var(--text-dark);">Quick Actions</h3>
             </div>
             """, unsafe_allow_html=True)
-            col_btn1, col_btn2, col_btn3 = st.columns(3)
+            st.markdown("<div style='margin-bottom: 1.5rem;'></div>", unsafe_allow_html=True)
+            col_btn1, col_btn2 = st.columns(2)
             
             with col_btn1:
-                if st.button("📝 Generate Summary", type="primary", use_container_width=True):
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    try:
-                        status_text.text("📝 Formatting patient data...")
-                        progress_bar.progress(20)
-                        patient_text = st.session_state.rag_system.format_patient_fields(st.session_state.current_patient)
-                        
-                        status_text.text("🤖 Generating summary with AI...")
-                        progress_bar.progress(40)
-                        start_time = time.time()
-                        
-                        # Use FastAPI if available
-                        if st.session_state.get('use_fastapi', False):
-                            template_outline = st.session_state.get("template_outline")
-                            summary = st.session_state.api_client.generate_summary(patient_text, template_outline)
-                        else:
-                            # If a template outline exists, follow it strictly
-                            if "template_outline" in st.session_state and st.session_state.template_outline:
-                                summary = st.session_state.rag_system.generate_discharge_summary_with_template(patient_text, st.session_state.template_outline)
-                            else:
-                                summary = st.session_state.rag_system.generate_discharge_summary(patient_text)
-                        
-                        elapsed = time.time() - start_time
-                        progress_bar.progress(80)
-                        status_text.text("📄 Preparing document...")
-                        
-                        st.session_state.discharge_summary = summary
-                        # Build PDF (with template if provided)
-                        template_bytes = st.session_state.get("template_pdf_bytes", None)
-                        # For template mode, generate a clean PDF using the template's page size but avoid overlaying duplicate headings
-                        pdf_bytes = st.session_state.rag_system.generate_pdf_from_text(summary, template_bytes=None if st.session_state.get("template_outline") else template_bytes)
-                        st.session_state.discharge_summary_pdf = pdf_bytes
-                        
-                        progress_bar.progress(100)
-                        status_text.empty()
-                        progress_bar.empty()
-                        st.success(f"✅ Discharge summary generated in {elapsed:.1f}s!")
-                    except Exception as e:
-                        st.error(f"❌ Error generating summary: {str(e)}")
-                    st.rerun()
-            
-            with col_btn2:
-                if st.button("🔍 Find Similar Cases", use_container_width=True):
-                    with st.spinner("🔍 Searching for similar cases..."):
+                # Check if patient is preprocessed (from ChromaDB)
+                is_preprocessed = st.session_state.current_patient.get('_is_preprocessed', False) or st.session_state.current_patient.get('_source') == 'chromadb'
+                
+                if is_preprocessed and st.session_state.discharge_summary:
+                    # Show "View Discharge Summary" for preprocessed patients
+                    if st.button("📄 View Discharge Summary", type="primary", use_container_width=True):
+                        # Summary is already loaded, just scroll to it or show it
+                        st.session_state.show_summary = True
+                        st.rerun()
+                else:
+                    # Show "Generate Summary" for new patients or preprocessed without summary
+                    if st.button("📝 Generate Summary", type="primary", use_container_width=True):
+                        progress_bar = st.progress(0)
+                        status_text = st.empty()
                         try:
+                            status_text.text("📝 Formatting patient data...")
+                            progress_bar.progress(20)
                             patient_text = st.session_state.rag_system.format_patient_fields(st.session_state.current_patient)
+                            
+                            status_text.text("🤖 Generating summary with AI...")
+                            progress_bar.progress(40)
+                            start_time = time.time()
+                            
                             # Use FastAPI if available
                             if st.session_state.get('use_fastapi', False):
-                                similar_cases = st.session_state.api_client.search_similar(patient_text)
+                                template_outline = st.session_state.get("template_outline")
+                                summary = st.session_state.api_client.generate_summary(patient_text, template_outline)
                             else:
-                                similar_cases = st.session_state.rag_system.search_similar_cases(patient_text)
-                            st.session_state.similar_cases = similar_cases
-                            st.success(f"✅ Found {len(similar_cases)} similar cases!")
-                        except Exception as e:
-                            st.error(f"❌ Error searching cases: {str(e)}")
-                        st.rerun()
-            
-            with col_btn3:
-                if st.button("📊 Patient Overview", use_container_width=True):
-                    with st.spinner("📊 Analyzing patient data..."):
-                        try:
-                            patient = st.session_state.current_patient
-                            overview = f"""**Patient Overview:**
-
-**Name:** {patient.get('name', 'Unknown')}
-**Unit No:** {patient.get('unit no', 'N/A')}
-**Date of Birth:** {patient.get('date of birth', 'N/A')}
-**Sex:** {patient.get('sex', 'N/A')}
-**Service:** {patient.get('service', 'N/A')}
-**Chief Complaint:** {patient.get('chief complaint', 'N/A')}
-**Attending:** {patient.get('attending', 'N/A')}
-**Allergies:** {patient.get('allergies', 'N/A')}
-**Past Medical History:** {patient.get('past medical history', 'N/A')[:200]}{'...' if len(str(patient.get('past medical history', ''))) > 200 else ''}
-
-This patient is ready for discharge summary generation."""
+                                # If a template outline exists, follow it strictly
+                                if "template_outline" in st.session_state and st.session_state.template_outline:
+                                    summary = st.session_state.rag_system.generate_discharge_summary_with_template(patient_text, st.session_state.template_outline)
+                                else:
+                                    summary = st.session_state.rag_system.generate_discharge_summary(patient_text)
                             
-                            st.session_state.chat_history.append({
-                                "role": "ai",
-                                "content": overview,
-                                "timestamp": datetime.now()
-                            })
-                            st.success("✅ Patient overview added to chat!")
+                            elapsed = time.time() - start_time
+                            progress_bar.progress(80)
+                            status_text.text("📄 Preparing document...")
+                            
+                            st.session_state.discharge_summary = summary
+                            # Build PDF (with template if provided)
+                            template_bytes = st.session_state.get("template_pdf_bytes", None)
+                            # For template mode, generate a clean PDF using the template's page size but avoid overlaying duplicate headings
+                            pdf_bytes = st.session_state.rag_system.generate_pdf_from_text(summary, template_bytes=None if st.session_state.get("template_outline") else template_bytes)
+                            st.session_state.discharge_summary_pdf = pdf_bytes
+                            
+                            progress_bar.progress(100)
+                            status_text.text(f"✅ Summary generated in {elapsed:.1f}s")
+                            time.sleep(0.5)
+                            progress_bar.empty()
+                            status_text.empty()
+                            
+                            st.success(f"✅ Discharge summary generated successfully in {elapsed:.1f}s!")
+                            st.rerun()
                         except Exception as e:
-                            st.error(f"❌ Error generating overview: {str(e)}")
-                        st.rerun()
+                            progress_bar.empty()
+                            status_text.empty()
+                            st.error(f"❌ Error generating summary: {str(e)}")
+                            import traceback
+                            st.debug(traceback.format_exc())
+            
+            with col_btn2:
+                if st.button("📊 Patient Overview", use_container_width=True):
+                    st.session_state.show_patient_overview = True
+                    st.rerun()
         
         else:
             st.markdown("""
@@ -1585,7 +2468,7 @@ This patient is ready for discharge summary generation."""
     
     with col2:
         st.markdown("""
-        <div class="card-header">
+        <div class="card-header" style="margin-top: 1rem; margin-bottom: 2.5rem;">
             <div class="card-header-icon">📋</div>
             <h3 style="margin: 0; color: var(--text-dark);">Generated Content</h3>
         </div>
@@ -1594,8 +2477,8 @@ This patient is ready for discharge summary generation."""
         # Display discharge summary (editable)
         if st.session_state.discharge_summary:
             st.markdown("""
-            <div class="summary-card">
-                <div class="card-header">
+            <div class="summary-card" style="margin-top: 1.5rem; margin-bottom: 2rem;">
+                <div class="card-header" style="margin-top: 0; margin-bottom: 1.5rem;">
                     <div class="card-header-icon">📄</div>
                     <h3 style="margin: 0; color: var(--text-dark);">Discharge Summary (Editable)</h3>
                 </div>
@@ -1614,6 +2497,8 @@ This patient is ready for discharge summary generation."""
                  height=500,
                  label_visibility="collapsed"
              )
+            
+            st.markdown("<div style='margin-top: 2rem; margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
 
             col_save, col_reset = st.columns([1,1])
             with col_save:
@@ -1626,7 +2511,9 @@ This patient is ready for discharge summary generation."""
                     st.rerun() # Rerun to ensure text_area updates
 
             # --- START: NEW FEEDBACK LOOP UI ---
+            st.markdown("<div style='margin-top: 2.5rem; margin-bottom: 1.5rem;'></div>", unsafe_allow_html=True)
             st.markdown("---")
+            st.markdown("<div style='margin-top: 1.5rem; margin-bottom: 1rem;'></div>", unsafe_allow_html=True)
             st.markdown("### 🧠 RAG Feedback Loop")
             
             if st.button("Commit Summary to Knowledgebase", 
@@ -1671,20 +2558,147 @@ This patient is ready for discharge summary generation."""
                     file_name=f"discharge_summary_{st.session_state.current_patient.get('unit no', 'unknown')}.pdf",
                     mime="application/pdf"
                 )
+    
+    # Patient Overview Modal (displayed at top when requested)
+    if st.session_state.show_patient_overview and st.session_state.current_patient:
+        patient = st.session_state.current_patient
         
-        # Display similar cases
-        if hasattr(st.session_state, 'similar_cases') and st.session_state.similar_cases:
-            st.markdown("### 🔍 Similar Cases Found")
+        # Helper function to format text with standardized subheadings
+        def format_text_with_subheadings(text: str) -> str:
+            """Format text by making subheadings smaller and professional"""
+            import re
+            if not text or text == 'N/A':
+                return text
             
-            for i, case in enumerate(st.session_state.similar_cases):
-                with st.expander(f"Case {i+1} - Similarity: {case['similarity']:.2%}"):
-                    st.write("**Patient Info:**")
-                    st.write(f"Name: {case['metadata'].get('name', 'Unknown')}")
-                    st.write(f"Unit No: {case['metadata'].get('unit_no', 'Unknown')}")
-                    
-                    st.write("**Summary Preview:**")
-                    summary_preview = case['metadata'].get('summary', 'No summary available')[:200] + "..."
-                    st.write(summary_preview)
+            # List of common subheadings to standardize
+            subheadings = [
+                r'SECONDARY DIAGNOSES?:',
+                r'ACUTE ISSUES?:',
+                r'CHRONIC ISSUES?:',
+                r'PRIMARY DIAGNOSIS:',
+                r'DISCHARGE DIAGNOSIS:',
+                r'ADMISSION DIAGNOSIS:',
+                r'PROCEDURES?:',
+                r'MEDICATIONS?:',
+                r'ALLERGIES?:',
+                r'COMPLICATIONS?:',
+                r'FOLLOW-UP:',
+                r'DISCHARGE INSTRUCTIONS?:',
+            ]
+            
+            formatted_text = str(text)
+            # Replace large subheadings with smaller, standardized ones
+            for pattern in subheadings:
+                # Match the pattern (case insensitive)
+                regex = re.compile(pattern, re.IGNORECASE)
+                # Replace with smaller heading
+                formatted_text = regex.sub(
+                    lambda m: f'<span style="font-size: 0.95rem; font-weight: 600; color: var(--primary-light);">{m.group(0).strip()}</span>',
+                    formatted_text
+                )
+            
+            return formatted_text
+        
+        # Create modal-like container
+        st.markdown("""
+        <div style="background: var(--bg-card); border: 2px solid var(--primary); border-radius: 24px; padding: 2rem; margin: 1rem 0; box-shadow: var(--shadow-lg);">
+        """, unsafe_allow_html=True)
+        
+        col_title, col_close = st.columns([4, 1])
+        with col_title:
+            st.markdown("### 📊 Patient Overview")
+        with col_close:
+            # Use form for faster response
+            with st.form(key="close_overview_form"):
+                if st.form_submit_button("✕ Close", use_container_width=True):
+                    st.session_state.show_patient_overview = False
+                    st.rerun()
+        
+        st.markdown("---")
+        
+        # Basic Information
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"""
+            <div style="background: var(--bg-secondary); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
+                <p style="margin: 0.25rem 0; color: var(--text-primary); font-size: 0.95rem;"><strong>Name:</strong> {patient.get('name', 'Unknown')}</p>
+                <p style="margin: 0.25rem 0; color: var(--text-primary); font-size: 0.95rem;"><strong>Unit No:</strong> {patient.get('unit no', 'N/A')}</p>
+                <p style="margin: 0.25rem 0; color: var(--text-primary); font-size: 0.95rem;"><strong>Date of Birth:</strong> {patient.get('date of birth', 'N/A')}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        with col2:
+            st.markdown(f"""
+            <div style="background: var(--bg-secondary); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
+                <p style="margin: 0.25rem 0; color: var(--text-primary); font-size: 0.95rem;"><strong>Sex:</strong> {patient.get('sex', 'N/A')}</p>
+                <p style="margin: 0.25rem 0; color: var(--text-primary); font-size: 0.95rem;"><strong>Service:</strong> {patient.get('service', 'N/A')}</p>
+                <p style="margin: 0.25rem 0; color: var(--text-primary); font-size: 0.95rem;"><strong>Admission Date:</strong> {patient.get('admission date', 'N/A')}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Clinical Information
+        st.markdown(f"""
+        <div style="background: var(--bg-secondary); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
+            <p style="margin: 0.25rem 0; color: var(--text-primary); font-size: 0.95rem;"><strong>Chief Complaint:</strong> {patient.get('chief complaint', 'N/A')}</p>
+            <p style="margin: 0.25rem 0; color: var(--text-primary); font-size: 0.95rem;"><strong>Attending Physician:</strong> {patient.get('attending', 'N/A')}</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Past Medical History
+        pmh = patient.get('past medical history', 'N/A')
+        if pmh and pmh != 'N/A' and str(pmh).strip():
+            formatted_pmh = format_text_with_subheadings(str(pmh))
+            st.markdown(f"""
+            <div style="background: var(--bg-secondary); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
+                <p style="margin: 0 0 0.5rem 0; color: var(--primary-light); font-weight: 600; font-size: 1rem;">📜 Past Medical History</p>
+                <div style="color: var(--text-secondary); line-height: 1.6; font-size: 0.9rem;">{formatted_pmh}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Allergies
+        allergies = patient.get('allergies', 'N/A')
+        if allergies and allergies != 'N/A':
+            formatted_allergies = format_text_with_subheadings(str(allergies))
+            st.markdown(f"""
+            <div style="background: var(--bg-secondary); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
+                <p style="margin: 0 0 0.5rem 0; color: var(--primary-light); font-weight: 600; font-size: 1rem;">⚠️ Allergies</p>
+                <div style="color: var(--text-secondary); font-size: 0.9rem;">{formatted_allergies}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Procedures
+        procedure = patient.get('major surgical or invasive procedure', 'N/A')
+        if procedure and procedure != 'N/A' and str(procedure).strip():
+            formatted_procedure = format_text_with_subheadings(str(procedure))
+            st.markdown(f"""
+            <div style="background: var(--bg-secondary); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
+                <p style="margin: 0 0 0.5rem 0; color: var(--primary-light); font-weight: 600; font-size: 1rem;">🔬 Procedures</p>
+                <div style="color: var(--text-secondary); line-height: 1.6; font-size: 0.9rem;">{formatted_procedure}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Discharge Diagnosis
+        dx = patient.get('discharge diagnosis', 'N/A')
+        if dx and dx != 'N/A' and str(dx).strip():
+            formatted_dx = format_text_with_subheadings(str(dx))
+            st.markdown(f"""
+            <div style="background: var(--bg-secondary); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
+                <p style="margin: 0 0 0.5rem 0; color: var(--primary-light); font-weight: 600; font-size: 1rem;">🩺 Discharge Diagnosis</p>
+                <div style="color: var(--text-secondary); line-height: 1.6; font-size: 0.9rem;">{formatted_dx}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        # Brief Hospital Course
+        course = patient.get('brief hospital course', 'N/A')
+        if course and course != 'N/A' and str(course).strip():
+            formatted_course = format_text_with_subheadings(str(course))
+            st.markdown(f"""
+            <div style="background: var(--bg-secondary); border-radius: 12px; padding: 1rem; margin: 0.5rem 0;">
+                <p style="margin: 0 0 0.5rem 0; color: var(--primary-light); font-weight: 600; font-size: 1rem;">📝 Brief Hospital Course</p>
+                <div style="color: var(--text-secondary); line-height: 1.6; font-size: 0.9rem;">{formatted_course}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        
+        st.markdown("</div>", unsafe_allow_html=True)
     
     # Footer removed - status is now in header
 

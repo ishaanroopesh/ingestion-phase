@@ -59,8 +59,9 @@ if __name__ == "__main__":
         print(f"\n\n❌ Error starting server: {e}")
         print("\nTroubleshooting:")
         print("1. Make sure all dependencies are installed: pip install -r requirements.txt")
-        print("2. Check if Ollama is running: ollama serve")
-        print("3. Verify MongoDB connection string is correct")
+        print("2. Verify GROQ_API_KEY is set: Check your .env file or environment variables")
+        print("3. Get your API key from: https://console.groq.com/keys")
+        print("4. Verify MongoDB connection string is correct")
         sys.exit(1)
 
 

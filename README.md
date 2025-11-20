@@ -1,10 +1,10 @@
 # 🏥 Medical Discharge Summary Assistant
 
-An AI-powered medical documentation system that generates discharge summaries using RAG (Retrieval-Augmented Generation) architecture with LLaMA 3, integrated with AutoGen for conversational AI assistance.
+An AI-powered medical documentation system that generates discharge summaries using RAG (Retrieval-Augmented Generation) architecture with Groq API, integrated with AutoGen for conversational AI assistance.
 
 ## ✨ Features
 
-- **🤖 AI-Powered Discharge Summary Generation**: Automatically generates comprehensive discharge summaries using LLaMA 3
+- **🤖 AI-Powered Discharge Summary Generation**: Automatically generates comprehensive discharge summaries using Groq API with LLaMA 4 Maverick model
 - **💬 Conversational AI Agent**: Interactive chat interface powered by AutoGen for doctor-patient queries
 - **🔍 RAG-Based Similar Case Search**: Find similar patient cases using semantic search with Bio ClinicalBERT embeddings
 - **📊 Modern Dark Theme UI**: Beautiful, modern interface with smooth animations and professional design
@@ -18,11 +18,47 @@ An AI-powered medical documentation system that generates discharge summaries us
 ### Prerequisites
 
 - Python 3.8 or higher
-- Ollama installed and running with LLaMA 3 model
+- Groq API key (get one at https://console.groq.com/keys)
 - MongoDB connection (cloud or local)
 - CUDA-capable GPU (optional, for faster embeddings)
 
-### Step 1: Install Dependencies
+### Step 1: Get Your Groq API Key
+
+1. Visit [Groq Console](https://console.groq.com/)
+2. Sign up for a free account (or log in if you already have one)
+3. Navigate to **API Keys** section: https://console.groq.com/keys
+4. Click **"Create API Key"**
+5. Copy your API key
+
+### Step 2: Set Up Environment Variables
+
+Create a `.env` file in the `ingestion-phase` directory:
+
+```bash
+cd ingestion-phase
+```
+
+**Windows (PowerShell):**
+```powershell
+New-Item -Path .env -ItemType File
+```
+
+**Linux/Mac:**
+```bash
+touch .env
+```
+
+Add your API key to the `.env` file:
+
+```env
+GROQ_API_KEY=your_actual_api_key_here
+```
+
+**Important:** Never commit the `.env` file to git! It's already in `.gitignore`.
+
+For detailed Groq setup instructions, see [GROQ_SETUP.md](GROQ_SETUP.md)
+
+### Step 3: Install Dependencies
 
 ```bash
 cd ingestion-phase
@@ -39,40 +75,36 @@ pip install -r requirements.txt
 - `transformers` - Hugging Face transformers
 - `chromadb` - Vector database
 - `pymongo` - MongoDB driver
+- `groq` - Groq API client
+- `python-dotenv` - Environment variable management
 
-### Step 2: Start Ollama (Required)
+### Step 4: Start FastAPI Backend (Required)
 
-Make sure Ollama is running with the LLaMA 3 model:
+**Open Terminal 1:**
 
+**Option A: Using Python script (Recommended)**
 ```bash
-# Start Ollama server
-ollama serve
-
-# In another terminal, pull LLaMA 3 if not already installed
-ollama pull llama3
-```
-
-### Step 3: Start FastAPI Backend (Recommended for Best Performance)
-
-**Option A: Using the batch file (Windows)**
-```bash
-start_api.bat
-```
-
-**Option B: Using the shell script (Linux/Mac)**
-```bash
-chmod +x start_api.sh
-./start_api.sh
-```
-
-**Option C: Using Python directly**
-```bash
+cd ingestion-phase
 python start_api.py
 ```
 
-**Option D: Using uvicorn directly**
+**Option B: Using uvicorn directly**
 ```bash
+cd ingestion-phase
 uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+**Option C: Using batch file (Windows)**
+```bash
+cd ingestion-phase
+start_api.bat
+```
+
+**Option D: Using shell script (Linux/Mac)**
+```bash
+cd ingestion-phase
+chmod +x start_api.sh
+./start_api.sh
 ```
 
 **Expected output:**
@@ -92,23 +124,33 @@ INFO:     Uvicorn running on http://0.0.0.0:8000
 
 **Keep this terminal open!** The FastAPI server must remain running.
 
-### Step 4: Start Streamlit Frontend
+### Step 5: Start Streamlit Frontend
 
-**Open a NEW terminal/command prompt** (keep FastAPI terminal running):
+**Open Terminal 2** (keep FastAPI terminal running):
 
-**Option A: Using the launcher script**
+**Option A: Using Streamlit directly (Recommended)**
 ```bash
-python run_app.py
-```
-
-**Option B: Using Streamlit directly**
-```bash
+cd ingestion-phase
 streamlit run app.py
 ```
 
-**Option C: Using the batch file (Windows)**
+**Option B: Using Python launcher**
 ```bash
+cd ingestion-phase
+python run_app.py
+```
+
+**Option C: Using batch file (Windows)**
+```bash
+cd ingestion-phase
 start.bat
+```
+
+**Option D: Using shell script (Linux/Mac)**
+```bash
+cd ingestion-phase
+chmod +x start.sh
+./start.sh
 ```
 
 **Expected output:**
@@ -119,7 +161,7 @@ Local URL: http://localhost:8501
 Network URL: http://192.168.x.x:8501
 ```
 
-### Step 5: Access the Application
+### Step 6: Access the Application
 
 1. Open your browser and navigate to: `http://localhost:8501`
 2. The app will automatically detect if FastAPI is running
@@ -129,18 +171,18 @@ Network URL: http://192.168.x.x:8501
 ## 📋 Complete Startup Checklist
 
 - [ ] Python 3.8+ installed
+- [ ] Groq API key obtained and added to `.env` file
 - [ ] Dependencies installed (`pip install -r requirements.txt`)
-- [ ] Ollama running with LLaMA 3 model
 - [ ] MongoDB accessible (connection string configured)
-- [ ] FastAPI backend started (Terminal 1)
-- [ ] Streamlit frontend started (Terminal 2)
+- [ ] FastAPI backend started (Terminal 1) - `python start_api.py`
+- [ ] Streamlit frontend started (Terminal 2) - `streamlit run app.py`
 - [ ] Browser opened to `http://localhost:8501`
 
 ## 🎯 Usage Guide
 
 ### 1. Search for a Patient
 
-1. In the sidebar, enter a patient's **Unit Number**
+1. In the sidebar, enter a patient's **Unit Number** or select from dropdown
 2. Click **"🔍 Search Patient"**
 3. Patient information will appear in the sidebar
 
@@ -169,12 +211,11 @@ The summary will appear in the right panel and can be:
 - 💾 Saved with edits
 - 📥 Downloaded as TXT, DOCX, or PDF
 
-### 4. Find Similar Cases
+### 4. Patient Overview
 
-1. Click **"🔍 Find Similar Cases"**
-2. The system searches for similar patient cases using RAG
-3. View similarity scores and case summaries
-4. Use for clinical decision support
+1. Click **"👤 Patient Overview"** to view detailed patient information
+2. View formatted patient data in a professional modal
+3. Close the overview when done
 
 ### 5. Upload Template (Optional)
 
@@ -196,9 +237,9 @@ After generating and editing a summary:
 
 ```
 ┌─────────────┐         ┌──────────────┐         ┌─────────────┐
-│  Streamlit  │ ──────> │   FastAPI    │ ──────> │   Ollama   │
-│  Frontend   │  HTTP   │   Backend    │  HTTP   │   (LLM)    │
-│  (Port 8501)│         │  (Port 8000) │         │ (Port 11434)│
+│  Streamlit  │ ──────> │   FastAPI    │ ──────> │   Groq API  │
+│  Frontend   │  HTTP   │   Backend    │  HTTP   │   (LLM)     │
+│  (Port 8501)│         │  (Port 8000) │         │  (Cloud)    │
 └─────────────┘         └──────────────┘         └─────────────┘
                               │
                               ├──> MongoDB (Patient Records)
@@ -209,7 +250,7 @@ After generating and editing a summary:
 
 - **Frontend**: Streamlit with modern dark theme UI
 - **Backend**: FastAPI with async/await for high performance
-- **LLM**: LLaMA 3 via Ollama
+- **LLM**: Groq API with `meta-llama/llama-4-maverick-17b-128e-instruct` model
 - **Embeddings**: Bio ClinicalBERT (medical domain-specific)
 - **Vector DB**: ChromaDB for similarity search
 - **Database**: MongoDB for patient records
@@ -227,15 +268,13 @@ After generating and editing a summary:
   - Discharge summary generation: **30-50% faster**
   - Similar case searches: **50-80% faster** (with caching)
 
-### Additional Optimizations
+### Groq API Benefits
 
-- **Embedding Cache**: Avoids recomputing embeddings for same text
-- **Reduced Token Limits**: Optimized for faster responses
-  - Chat: 150 tokens (reduced from 250)
-  - Summary: 500 tokens (reduced from 700)
-- **Lower Temperature**: More deterministic, faster responses
-- **Request Timeouts**: Faster failure handling
-- **Streaming Responses**: Real-time response generation
+- **Fast Inference**: Groq's specialized hardware provides very fast responses
+- **No Local Setup**: No need to install or run Ollama locally
+- **Scalable**: Automatically scales with your usage
+- **Production Ready**: Built for production deployments
+- **Cost Effective**: Free tier available, pay-as-you-go pricing
 
 ## 🎨 UI Features
 
@@ -253,7 +292,7 @@ After generating and editing a summary:
 - **Card-based Layout**: Modern card design with hover effects
 - **Chat Interface**: Beautiful message bubbles with avatars
 - **Status Cards**: Visual indicators for system health
-- **Custom Scrollbars**: Styled scrollbars for better UX
+- **Glassmorphism Effects**: Modern glass-like UI elements
 
 ## 📡 API Endpoints (FastAPI)
 
@@ -264,8 +303,8 @@ After generating and editing a summary:
 ### Core Operations
 - `POST /api/chat` - Chat with AI agent
 - `POST /api/generate-summary` - Generate discharge summary
-- `POST /api/search-similar` - Search similar cases
 - `POST /api/patient` - Get patient by unit number
+- `GET /api/patients` - Get all patients list
 
 ### API Documentation
 
@@ -277,22 +316,24 @@ When FastAPI is running, visit:
 
 ### Environment Variables
 
+Create a `.env` file in the `ingestion-phase` directory:
+
 ```bash
+# Groq API Configuration (Required)
+GROQ_API_KEY=your_groq_api_key_here
+
 # FastAPI URL (optional, defaults to localhost:8000)
-export FASTAPI_URL=http://localhost:8000
+FASTAPI_URL=http://localhost:8000
 
 # MongoDB URI (configured in config.py)
 MONGO_URI=your_mongodb_connection_string
-
-# Ollama Configuration
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=llama3
 ```
 
 ### Configuration Files
 
 - `config.py` - Main configuration file
 - `local_config.json` - Local overrides (optional)
+- `.env` - Environment variables (not committed to git)
 
 ## 🐛 Troubleshooting
 
@@ -328,15 +369,29 @@ pip install -r requirements.txt
 3. Refresh the Streamlit page (F5)
 4. Check firewall settings
 
-### Ollama Connection Issues
+### Groq API Issues
 
-**Problem**: "Error connecting to Ollama"
+**Problem**: "GROQ_API_KEY environment variable is not set"
 
 **Solutions**:
-1. Verify Ollama is running: `ollama serve`
-2. Check LLaMA 3 is installed: `ollama list`
-3. Pull model if missing: `ollama pull llama3`
-4. Verify port 11434 is accessible
+1. Verify `.env` file exists in `ingestion-phase` directory
+2. Check `.env` file contains `GROQ_API_KEY=your_key_here` (no quotes)
+3. Restart your terminal/IDE after setting the variable
+4. Verify the variable: `echo $GROQ_API_KEY` (Linux/Mac) or `echo %GROQ_API_KEY%` (Windows)
+
+**Problem**: "Invalid Groq API key"
+
+**Solutions**:
+1. Verify your API key is correct at https://console.groq.com/keys
+2. Make sure there are no extra spaces or quotes around the key
+3. Regenerate the key if needed
+
+**Problem**: "Groq API rate limit exceeded"
+
+**Solutions**:
+1. Wait a few minutes and try again
+2. Consider upgrading your Groq plan for higher limits
+3. The code includes automatic retry logic with exponential backoff
 
 ### Database Connection Issues
 
@@ -370,9 +425,12 @@ ingestion-phase/
 ├── start_api.sh           # Linux/Mac script for FastAPI
 ├── run_app.py             # Streamlit launcher
 ├── start.bat              # Windows batch file for Streamlit
+├── start.sh               # Linux/Mac script for Streamlit
 ├── requirements.txt       # Python dependencies
 ├── README.md              # This file
 ├── README_FASTAPI.md      # FastAPI-specific documentation
+├── GROQ_SETUP.md          # Groq API setup guide
+├── .env                   # Environment variables (not in git)
 ├── data/                  # Data files
 ├── embeddings/            # Generated embeddings
 ├── processed/             # Processed data
@@ -415,7 +473,7 @@ ingestion-phase/
 
 - [FastAPI Documentation](https://fastapi.tiangolo.com/)
 - [Streamlit Documentation](https://docs.streamlit.io/)
-- [Ollama Documentation](https://ollama.ai/docs)
+- [Groq API Documentation](https://console.groq.com/docs)
 - [ChromaDB Documentation](https://docs.trychroma.com/)
 - [MongoDB Documentation](https://www.mongodb.com/docs/)
 
@@ -438,7 +496,7 @@ ingestion-phase/
 ## 🙏 Acknowledgments
 
 - Bio ClinicalBERT model by Emily Alsentzer
-- LLaMA 3 by Meta
+- Groq API for fast LLM inference
 - FastAPI by Sebastián Ramírez
 - Streamlit team
 - ChromaDB team
@@ -453,14 +511,16 @@ If you encounter issues:
 2. Review the terminal output for error messages
 3. Verify all prerequisites are met
 4. Check that all services are running:
-   - ✅ Ollama (port 11434)
+   - ✅ Groq API (cloud service, no local setup needed)
    - ✅ FastAPI (port 8000)
    - ✅ Streamlit (port 8501)
    - ✅ MongoDB (accessible)
 
 For detailed FastAPI information, see [README_FASTAPI.md](README_FASTAPI.md)
 
+For Groq API setup, see [GROQ_SETUP.md](GROQ_SETUP.md)
+
 ---
 
 **Last Updated**: 2024
-**Version**: 2.0.0 (with FastAPI backend and modern UI)
+**Version**: 2.0.0 (with FastAPI backend, Groq API, and modern UI)

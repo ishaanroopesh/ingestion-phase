@@ -14,7 +14,7 @@ def run_command(command, description):
     """Run a command and handle errors"""
     print(f"🔄 {description}...")
     try:
-        result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True)
+        result = subprocess.run(command, shell=True, check=True, capture_output=True, text=True, encoding='utf-8', errors='replace')
         print(f"✅ {description} completed successfully")
         return True
     except subprocess.CalledProcessError as e:
@@ -142,7 +142,7 @@ echo "🚀 Launching Streamlit application..."
 streamlit run app.py --server.port 8501 --server.address localhost
 """
     
-    with open("start.sh", "w") as f:
+    with open("start.sh", "w", encoding='utf-8') as f:
         f.write(startup_script)
     
     # Make it executable on Unix systems
